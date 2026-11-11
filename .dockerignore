@@ -1,0 +1,14 @@
+.git
+.gitignore
+.github
+data
+data/
+.env
+.env.*
+!.env.example
+docs
+scripts
+*.md
+*.png
+*.log
+node_modules
