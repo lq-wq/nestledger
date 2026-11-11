@@ -1,0 +1,9 @@
+# 统一使用 LF：Docker 镜像与 NAS 上的 shell 脚本不能被 CRLF 破坏
+* text=auto eol=lf
+
+# 二进制资源
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.pdf binary
+*.zip binary
