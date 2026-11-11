@@ -1,0 +1,31 @@
+# 栖间 · NestLedger —— 飞牛 NAS / 任意 Docker Compose 环境
+# 用法：docker compose up -d --build      （首次，源码本地构建）
+#       docker compose up -d             （之后，使用已有本地镜像）
+#       docker compose pull && docker compose up -d   （改用 GHCR 镜像更新，见 README）
+services:
+  nestledger:
+    image: ${IMAGE:-nestledger:local}
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: nestledger
+    restart: unless-stopped
+    stop_grace_period: 10s
+    ports:
+      - "${PORT:-8787}:8787"
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+      DATA_DIR: /data
+      BACKUP_KEEP: ${BACKUP_KEEP:-30}
+      BACKUP_ON_WRITE: ${BACKUP_ON_WRITE:-1}
+      MAX_BODY: ${MAX_BODY:-67108864}
+      AUTH_USER: ${AUTH_USER:-}
+      AUTH_PASS: ${AUTH_PASS:-}
+    volumes:
+      # 所有业务数据、附件与自动快照都在这个目录，备份 / 迁移只需复制它
+      - ./data:/data
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "3"
