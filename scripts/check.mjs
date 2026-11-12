@@ -2,6 +2,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import vm from 'node:vm';
+import zlib from 'node:zlib';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
@@ -18,10 +19,11 @@ const has = f => fs.existsSync(path.join(root, f));
 console.log('栖间 · NestLedger 项目自检\n');
 for (const f of [
   'web/index.html', 'server/index.js', 'server/package.json', 'Dockerfile',
-  'docker-compose.yml', 'docker-compose.image.yml',
+  'docker-compose.yml', 'docker-compose.image.yml', 'docker-compose.standalone.yml',
   '.env.example', '.gitignore', '.dockerignore', '.gitattributes',
   'README.md', 'LICENSE', 'CHANGELOG.md', '.github/workflows/release.yml',
   'scripts/check.mjs', 'scripts/smoke.mjs', 'scripts/predeploy.sh',
+  'scripts/gen-standalone.mjs', 'scripts/test-standalone.mjs',
   'scripts/backup.sh', 'scripts/restore.sh',
   'docs/飞牛NAS部署.md', 'docs/备份与恢复.md'
 ]) check('存在 ' + f, has(f));
@@ -64,6 +66,24 @@ check('纯镜像版不触发 build', !/\bbuild:/.test(imageCompose));
 check('纯镜像版挂载 ./data', imageCompose.includes('./data:/data'));
 check('纯镜像版端口一致', imageCompose.includes('"8787:8787"'));
 
+const standalone = read('docker-compose.standalone.yml');
+const stCode = standalone.split('\n').filter(l => !/^\s*#/.test(l)).join('\n');
+check('自包含版不触发 build（非注释行）', !/\bbuild:/.test(stCode));
+check('自包含版不依赖 Dockerfile（非注释行）', !/dockerfile/i.test(stCode));
+check('自包含版使用 node 基础镜像', stCode.includes('image: node:22-alpine'));
+check('自包含版无 compose 变量插值（兼容飞牛 GUI）', !/\$\{/.test(standalone));
+check('自包含版挂载 ./data', stCode.includes('./data:/data'));
+check('自包含版含健康检查', stCode.includes('healthcheck:'));
+const bundleMatch = standalone.match(/APP_BUNDLE: "([A-Za-z0-9+/=]+)"/);
+check('自包含版含单行内联包', !!bundleMatch);
+const embedded = JSON.parse(
+  zlib.brotliDecompressSync(Buffer.from(bundleMatch[1], 'base64')).toString('utf8')
+);
+check('内联包 server 与源码逐字一致', embedded['server/index.js'] === read('server/index.js'));
+check('内联包 web 与源码逐字一致', embedded['web/index.html'] === html);
+check('内联包只含两个运行必需文件', Object.keys(embedded).length === 2);
+check('生成脚本可重建内联包', read('scripts/gen-standalone.mjs').includes('brotliCompressSync'));
+
 const env = read('.env.example');
 check('.env.example 提供 BASE_IMAGE', env.includes('BASE_IMAGE=node:22-alpine'));
 check('.env.example 说明 IMAGE 仅用于纯镜像版', env.includes('docker-compose.image.yml'));
@@ -73,5 +93,6 @@ check('部署自检覆盖 Dockerfile', predeploy.includes('"Dockerfile"'));
 check('部署自检覆盖 server 与 web', predeploy.includes('"server/index.js"') && predeploy.includes('"web/index.html"'));
 check('部署自检识别 ZIP 多套一层', predeploy.includes('多套了一层'));
 check('部署自检识别 GUI 只导入 YAML', predeploy.includes('粘贴 YAML'));
+check('部署自检给出自包含版建议', predeploy.includes('docker-compose.standalone.yml'));
 
 console.log('\n全部通过：' + passed + ' 项检查\n');
