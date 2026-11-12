@@ -59,10 +59,12 @@ nestledger/
 ├─ server/
 │  ├─ index.js                # 零依赖 Node 服务端：静态托管 + 数据 API + 快照
 │  └─ package.json            # 无 dependencies
-├─ Dockerfile                 # node:22-alpine，单容器
-├─ docker-compose.yml         # 飞牛 NAS 直接可用
+├─ Dockerfile                 # node:22-alpine，单容器（基础镜像可换）
+├─ docker-compose.yml         # 源码构建版，飞牛 NAS 用这个
+├─ docker-compose.image.yml   # 纯 GHCR 镜像版，GUI 粘贴 YAML 专用，零源码依赖
 ├─ .env.example               # 配置模板（复制为 .env）
 ├─ scripts/
+│  ├─ predeploy.sh            # 部署前置自检（NAS 上先跑它）
 │  ├─ check.mjs               # 项目自检（语法 / 外链 / 配置），CI 也在跑
 │  ├─ smoke.mjs               # 接口冒烟测试（本地起服务验证读写/快照/鉴权）
 │  ├─ backup.sh               # 打包 data 目录
@@ -102,10 +104,13 @@ node index.js
 ### 方式 C · Docker Compose（推荐，飞牛 NAS 用这个）
 
 ```bash
-cp .env.example .env        # 可选：改端口 / 时区 / 密码
+bash scripts/predeploy.sh    # 先自检：Dockerfile/server/web 必须与本文件同层
+cp .env.example .env         # 可选：改端口 / 时区 / 密码
 docker compose up -d --build
 # 打开 http://localhost:8787
 ```
+
+> ⚠️ `docker-compose.yml` 用的是 `build: { context: . }`，所以 **`Dockerfile`、`server/`、`web/` 必须和它放在同一个目录**。若报 `failed to read dockerfile: open Dockerfile: no such file or directory`，跑一次 `bash scripts/predeploy.sh`，它会直接告诉你缺什么、是不是 ZIP 解压多套了一层。
 
 首次启动服务端没有数据，网页会把浏览器里已有的数据（或示例数据）自动迁移到 `./data/db.json`。之后所有设备访问同一地址，看到的都是这一份。
 
@@ -127,6 +132,8 @@ git push -u origin main
 
 推上去之后，`.github/workflows/release.yml` 会自动构建镜像发布到 `ghcr.io/<你的用户名>/nestledger`。如果 Actions 提示权限不足，到仓库 **Settings → Actions → General → Workflow permissions** 勾选 **Read and write permissions**。首次推送镜像后，若镜像是 private，在 **Packages** 里把可见性改为 Public（或在 NAS 上 `docker login ghcr.io`）。
 
+镜像可用后，就能用 `docker-compose.image.yml` 走「零源码文件」部署，见下一节方式三。
+
 ---
 
 ## 部署到飞牛 NAS（fnOS）
@@ -140,19 +147,32 @@ cd /vol1/docker
 git clone https://github.com/<你的用户名>/nestledger.git
 cd nestledger
 cp .env.example .env
+bash scripts/predeploy.sh
 docker compose up -d --build
 ```
 
 浏览器打开 `http://<NAS 的 IP>:8787`。
 
-**方式二：fnOS 图形界面**
+**方式二：fnOS 图形界面（项目目录里已有完整源码）**
 
-1. 打开 NAS 的 **Docker / 容器管理** → 找到 **Compose（项目）** → 新建项目
-2. 项目名填 `nestledger`，把本仓库整个文件夹放到 `/vol1/docker/nestledger`（或用「导入 / 上传 Compose」选择 `docker-compose.yml`）
+1. 先把**整个项目文件夹**（ZIP 解压后 `nestledger/` 里的内容）上传到 `/vol1/docker/nestledger`
+2. 打开 **Docker / 容器管理** → **Compose（项目）** → 新建项目，项目名 `nestledger`，**路径选择 `/vol1/docker/nestledger`**
 3. 端口保持 `8787:8787`，如需改端口编辑 `.env` 里的 `PORT`
 4. 启动项目，访问 `http://<NAS 的 IP>:8787`
 
-> 不同 fnOS 版本的菜单名称略有差别，认准「Compose / 项目 / 堆栈」即可。更详细的步骤与排障见 [docs/飞牛NAS部署.md](docs/飞牛NAS部署.md)。
+> ⚠️ 如果选择「粘贴 YAML / 导入 compose 文件」来创建项目，飞牛**只会保存这段 YAML**，不会把 `Dockerfile`、`server/`、`web/` 一起放进来，构建版必然报 `failed to read dockerfile`。这种情况请改用方式三。
+
+**方式三：fnOS 图形界面（纯镜像，零源码文件，最省事）**
+
+前提：已完成上面的 GitHub 推送，GHCR 镜像可用且为 Public。
+
+1. 复制 `docker-compose.image.yml` 全部内容，把 `image: ghcr.io/yourname/nestledger:latest` 中的 `yourname` 换成你的 GitHub 用户名
+2. 在飞牛 **Compose → 新增项目** 里选择「粘贴 YAML / 编辑 compose」，粘贴后启动
+3. 访问 `http://<NAS 的 IP>:8787`
+
+这个模式不执行 `docker build`，不需要 NAS 上有任何源码文件，也不会报找不到 Dockerfile。
+
+> 不同 fnOS 版本的菜单名称略有差别，认准「Compose / 项目 / 堆栈」即可。目录结构示意、镜像加速配置与完整排障见 [docs/飞牛NAS部署.md](docs/飞牛NAS部署.md)。
 
 **数据卷**：`./data:/data`。所有业务数据、合同附件、自动快照都在这一个目录里，**升级容器不会动它**。建议把它放在 NAS 上有快照 / 冗余保护的共享文件夹。
 
@@ -182,7 +202,7 @@ nestledger/data/
 
 ## 更新与维护
 
-**源码更新（推荐）**
+**源码更新（方式一 / 二）**
 
 ```bash
 cd /vol1/docker/nestledger
@@ -190,28 +210,26 @@ git pull
 docker compose up -d --build
 ```
 
-**镜像更新（不想在 NAS 上编译时用）**
+**镜像更新（方式三）**
 
-在 NAS 的 `.env` 里设置：
-
-```dotenv
-IMAGE=ghcr.io/<你的用户名>/nestledger:latest
-```
-
-之后每次更新只需：
+在飞牛 Compose 项目里点「拉取 / 更新」，或 SSH 执行：
 
 ```bash
-docker compose pull && docker compose up -d
+docker compose -f docker-compose.image.yml pull
+docker compose -f docker-compose.image.yml up -d
 ```
 
 改动前端或服务端后，本地先跑一遍：
 
 ```bash
+bash scripts/predeploy.sh   # NAS 上：部署前置自检
 node scripts/check.mjs     # 语法、外链、品牌、compose 配置等静态自检
 node scripts/smoke.mjs     # 起两个临时服务，验证读写 / 快照 / 鉴权
 ```
 
-打版本标签（`git tag v1.1.0 && git push origin v1.1.0`）会触发 Actions 生成带版本号的镜像，方便回滚到指定版本。
+打版本标签（`git tag v1.1.1 && git push origin v1.1.1`）会触发 Actions 生成带版本号的镜像，方便回滚到指定版本。
+
+> v1.1.0 及更早版本里「在 `.env` 设 `IMAGE=` 再 `docker compose pull`」的做法已废弃：主 compose 不再含 `image:` 字段（避免国内 NAS 无谓地访问 Docker Hub 超时）。请统一改用 `docker-compose.image.yml`。
 
 ---
 
@@ -225,9 +243,11 @@ node scripts/smoke.mjs     # 起两个临时服务，验证读写 / 快照 / 鉴
 | `BACKUP_ON_WRITE` | `1` | 每次写入是否自动快照，`0` 关闭 |
 | `MAX_BODY` | `67108864` | 单次请求上限（字节），默认 64 MB |
 | `AUTH_USER` / `AUTH_PASS` | 空 | 同时填写才启用 HTTP Basic 认证 |
-| `IMAGE` | `nestledger:local` | 改用 GHCR 镜像时填写完整地址 |
+| `BASE_IMAGE` | `node:22-alpine` | 源码构建时的基础镜像；国内 NAS 拉不到 Docker Hub 时换成可用地址 |
 
-改完 `.env` 后执行 `docker compose up -d` 让配置生效。
+改完 `.env` 后执行 `docker compose up -d` 让配置生效（改 `BASE_IMAGE` 需 `up -d --build`）。
+
+> 纯镜像模式（`docker-compose.image.yml`）不读 `.env`，端口和参数直接写在 YAML 的 `ports` / `environment` 里修改。
 
 ---
 
@@ -242,6 +262,12 @@ node scripts/smoke.mjs     # 起两个临时服务，验证读写 / 快照 / 鉴
 
 ## 常见问题
 
+**Q：部署报 `failed to read dockerfile: open Dockerfile: no such file or directory`？**  
+构建上下文里没有 `Dockerfile`。先跑 `bash scripts/predeploy.sh`；常见原因是 ZIP 解压多套了一层，或在飞牛 GUI 用「粘贴 YAML」创建项目导致只保存了 compose 文件。修复步骤见 [部署文档排障章节](docs/飞牛NAS部署.md#8-排障)，或直接改用方式三纯镜像模式。
+
+**Q：日志里 `nestledger Pulling` 和 `registry-1.docker.io context deadline exceeded`？**  
+v1.1.0 及更早版本的 compose 同时写了 `image:` 与 `build:`，Compose 会先去 Docker Hub 找同名镜像。更新到 v1.1.1 即可消除。若构建卡在拉 `node:22-alpine`，在「飞牛 Docker → 设置 → 镜像加速」配置加速器，或在 `.env` 设置 `BASE_IMAGE`；也可用方式三彻底绕开构建。
+
 **Q：打开后显示的还是旧数据？**  
 NAS 上的 `data/db.json` 是权威副本，首次连接会以它为准。想用旧浏览器里的数据，先在旧页面「导出完整数据（JSON）」，再到 NAS 页面「导入备份」。
 
@@ -252,7 +278,7 @@ NAS 上的 `data/db.json` 是权威副本，首次连接会以它为准。想用
 数据已暂存浏览器，网络恢复后会自动重试写入；期间请勿清理浏览器数据。
 
 **Q：端口被占用？**  
-改 `.env` 的 `PORT`，例如 `PORT=8877`，然后 `docker compose up -d`。
+改 `.env` 的 `PORT`，例如 `PORT=8877`，然后 `docker compose up -d`。纯镜像模式则直接改 YAML 的 `ports`。
 
 **Q：合同附件能传多大？**  
 单文件 ≤ 2 MB；NAS 模式总容量比纯本地模式宽松得多（服务端上限 64 MB，可在 `.env` 调 `MAX_BODY`）。
