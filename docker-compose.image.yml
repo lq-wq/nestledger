@@ -1,0 +1,39 @@
+# 栖间 · NestLedger —— 纯镜像版（飞牛 NAS 图形界面「粘贴 YAML」专用）
+#
+# ✅ 这个模式【不需要】Dockerfile、server/、web/ 等任何本地源码文件，
+#    直接把本文件全部内容复制进飞牛 Docker → Compose → 新建项目即可。
+#    它不会触发 docker build，因此绝不会出现
+#    「failed to read dockerfile: open Dockerfile: no such file or directory」。
+#
+# ⚠️ 前提：先把仓库推到 GitHub，等 .github/workflows/release.yml 跑完，
+#    确认 ghcr.io/<你的用户名>/nestledger:latest 已生成且 Packages 可见性为 Public。
+#    然后把下面 image 里的 yourname 换成你的 GitHub 用户名（全小写）。
+#
+# 数据仍落在 Compose 项目目录下的 ./data，升级镜像不会丢数据。
+# 更新镜像：在飞牛 Compose 项目里点「拉取 / 更新」，或 SSH 执行
+#   docker compose -f docker-compose.image.yml pull && docker compose -f docker-compose.image.yml up -d
+services:
+  nestledger:
+    # ↓↓↓ 把 yourname 换成你的 GitHub 用户名（全小写）↓↓↓
+    image: ghcr.io/yourname/nestledger:latest
+    container_name: nestledger
+    restart: unless-stopped
+    stop_grace_period: 10s
+    ports:
+      - "8787:8787"
+    environment:
+      TZ: Asia/Shanghai
+      DATA_DIR: /data
+      BACKUP_KEEP: 30
+      BACKUP_ON_WRITE: 1
+      MAX_BODY: 67108864
+      # 需要口令时取消注释并填写（两个都要填）
+      # AUTH_USER: admin
+      # AUTH_PASS: change-me
+    volumes:
+      - ./data:/data
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "3"
