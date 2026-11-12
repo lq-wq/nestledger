@@ -1,13 +1,28 @@
-# 栖间 · NestLedger —— 飞牛 NAS / 任意 Docker Compose 环境
-# 用法：docker compose up -d --build      （首次，源码本地构建）
-#       docker compose up -d             （之后，使用已有本地镜像）
-#       docker compose pull && docker compose up -d   （改用 GHCR 镜像更新，见 README）
+# 栖间 · NestLedger —— 源码构建版（飞牛 NAS / 任意 Docker Compose 环境）
+#
+# ⚠️ 重要：本文件必须与下面这些文件放在【同一个目录】，否则会报
+#    failed to read dockerfile: open Dockerfile: no such file or directory
+#   Dockerfile  server/index.js  server/package.json  web/index.html  .env(可选)
+#   不确定就先跑： bash scripts/predeploy.sh
+#
+# 用法：
+#   bash scripts/predeploy.sh          # 先自检目录结构
+#   docker compose up -d --build       # 首次，本地源码构建
+#   docker compose up -d               # 之后，复用已构建镜像
+#
+# 若只想在飞牛图形界面粘贴一段 YAML、不想上传源码文件，
+# 请改用 docker-compose.image.yml（纯 GHCR 镜像模式）。
+#
+# 注意：本文件刻意不写 image: 字段，避免 Compose 先去 Docker Hub 拉取
+# 不存在的本地标签（表现为 nestledger Pulling + registry-1.docker.io 超时）。
 services:
   nestledger:
-    image: ${IMAGE:-nestledger:local}
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        # 国内 NAS 拉不到 Docker Hub 时，在 .env 里把 BASE_IMAGE 换成可用地址
+        BASE_IMAGE: ${BASE_IMAGE:-node:22-alpine}
     container_name: nestledger
     restart: unless-stopped
     stop_grace_period: 10s
