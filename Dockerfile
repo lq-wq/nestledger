@@ -1,5 +1,10 @@
 # 栖间 · NestLedger —— 单容器、零 npm 依赖
-FROM node:22-alpine
+#
+# BASE_IMAGE 可在 .env 里覆盖：国内 NAS 连不上 Docker Hub 时，
+# 填自己 NAS「镜像加速」里能拉到的 node:22-alpine 地址即可。
+# 例：docker compose build --build-arg BASE_IMAGE=你的加速地址/library/node:22-alpine
+ARG BASE_IMAGE=node:22-alpine
+FROM ${BASE_IMAGE}
 
 ENV NODE_ENV=production \
     PORT=8787 \
