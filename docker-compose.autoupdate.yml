@@ -1,0 +1,67 @@
+# 栖间 · NestLedger —— GHCR 镜像 + Watchtower 容器级自动更新
+#
+# ✅ 链路：GitHub push → Actions「Build and Publish Image」推送新镜像
+#         → Watchtower 轮询发现新 digest → 自动拉取并重建容器 → 网页即最新版。
+#
+# ⚠️ 与默认 docker-compose.yml（自包含版）的区别：
+#    · 自包含版：网页端「关于与更新」从 GitHub 拉 update/latest.json，
+#      不动容器、不需要 docker.sock，适合飞牛 GUI 粘贴 YAML 的空项目。
+#    · 本文件：标准 Docker 镜像更新，整容器替换，需要挂载 docker.sock。
+#      若飞牛 NAS 不允许挂载 /var/run/docker.sock，或拉不到 Docker Hub 上的
+#      watchtower 镜像，请改用默认自包含版（同样支持网页端自动更新）。
+#
+# ⚠️ 前提：ghcr.io/lq-wq/nestledger:latest 已由 Actions 生成且 Packages 为 Public。
+#    私有镜像需先在 NAS 上 docker login ghcr.io，并给 watchtower 传认证配置。
+#
+# 数据卷 ./data 不在镜像里，Watchtower 重建容器不会丢数据。
+services:
+  nestledger:
+    image: ghcr.io/lq-wq/nestledger:latest
+    container_name: nestledger
+    restart: unless-stopped
+    stop_grace_period: 10s
+    ports:
+      - "8787:8787"
+    environment:
+      TZ: Asia/Shanghai
+      PORT: 8787
+      DATA_DIR: /data
+      WEB_DIR: /app/web
+      BACKUP_KEEP: 30
+      BACKUP_ON_WRITE: 1
+      MAX_BODY: 67108864
+      # 容器由 Watchtower 更新，网页端更新关闭；版本号随新镜像一起变化
+      UPDATE_OFF: 1
+    labels:
+      com.centurylinklabs.watchtower.enable: "true"
+    volumes:
+      - ./data:/data
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://127.0.0.1:8787/api/health',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "3"
+
+  watchtower:
+    image: containrrr/watchtower
+    container_name: nestledger-watchtower
+    restart: unless-stopped
+    environment:
+      TZ: Asia/Shanghai
+      WATCHTOWER_POLL_INTERVAL: 1800
+      WATCHTOWER_CLEANUP: "true"
+      WATCHTOWER_LABEL_ENABLE: "true"
+      WATCHTOWER_INCLUDE_STOPPED: "false"
+    command: --label-enable
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    logging:
+      driver: json-file
+      options:
+        max-size: "2m"
+        max-file: "2"

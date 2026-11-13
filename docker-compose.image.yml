@@ -5,17 +5,17 @@
 #    它不会触发 docker build，因此绝不会出现
 #    「failed to read dockerfile: open Dockerfile: no such file or directory」。
 #
-# ⚠️ 前提：先把仓库推到 GitHub，等 .github/workflows/release.yml 跑完，
-#    确认 ghcr.io/<你的用户名>/nestledger:latest 已生成且 Packages 可见性为 Public。
-#    然后把下面 image 里的 yourname 换成你的 GitHub 用户名（全小写）。
+# ⚠️ 前提：仓库 https://github.com/lq-wq/nestledger 已推送，
+#    .github/workflows/release.yml 的「Build and Publish Image」跑完，
+#    确认 ghcr.io/lq-wq/nestledger:latest 已生成且 Packages 可见性为 Public。
 #
 # 数据仍落在 Compose 项目目录下的 ./data，升级镜像不会丢数据。
 # 更新镜像：在飞牛 Compose 项目里点「拉取 / 更新」，或 SSH 执行
 #   docker compose -f docker-compose.image.yml pull && docker compose -f docker-compose.image.yml up -d
+# 想让 Actions 推完镜像后自动拉取重启，改用 docker-compose.autoupdate.yml（含 Watchtower）。
 services:
   nestledger:
-    # ↓↓↓ 把 yourname 换成你的 GitHub 用户名（全小写）↓↓↓
-    image: ghcr.io/yourname/nestledger:latest
+    image: ghcr.io/lq-wq/nestledger:latest
     container_name: nestledger
     restart: unless-stopped
     stop_grace_period: 10s
@@ -23,15 +23,25 @@ services:
       - "8787:8787"
     environment:
       TZ: Asia/Shanghai
+      PORT: 8787
       DATA_DIR: /data
+      WEB_DIR: /app/web
       BACKUP_KEEP: 30
       BACKUP_ON_WRITE: 1
       MAX_BODY: 67108864
+      # 镜像版由容器层更新（点「拉取 / 更新」或改用 docker-compose.autoupdate.yml），
+      # 因此关闭网页端更新，避免镜像内置版本与覆盖层版本号互相打架。
+      UPDATE_OFF: 1
       # 需要口令时取消注释并填写（两个都要填）
       # AUTH_USER: admin
       # AUTH_PASS: change-me
     volumes:
       - ./data:/data
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://127.0.0.1:8787/api/health',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
     logging:
       driver: json-file
       options:

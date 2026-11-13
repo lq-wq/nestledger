@@ -31,7 +31,7 @@
 | 网络请求 | **零请求**（`file://` 下完全不联网） | 仅访问自己的 NAS，无外网 |
 | 多设备 | 各存各的 | 手机 / 电脑 / 平板共用一份 |
 | 备份 | 手动导出 JSON | 每次保存自动快照 + 一键下载 + 目录级备份 |
-| 更新 | 替换 HTML 文件 | 重新生成并粘贴 `docker-compose.yml`（或 `git pull && docker compose up -d`） |
+| 更新 | 手动替换 HTML 文件 | **网页端自动更新**（v1.3.0 起，GitHub 更新后自动升级） |
 | 适用场景 | 临时离线用、随身携带 | 长期在 NAS 上使用（推荐） |
 
 > 两种模式共用同一个 `web/index.html`。程序会自动探测：能连上同步服务就以 NAS 为准，否则安静地退回纯本地模式。
@@ -46,6 +46,8 @@
 - **租金与财务**：账单自动生成、收款、部分收款、收支流水、CSV 导出
 - **收租提醒**：按「本次收租时间 + 付款方式」推算下一期；`1–10 天红`、`11–15 天黄`、`其他绿`（逾期归红、已结清灰）
 - **账期口径（v1.2.1）**：账期与收租时间共用同一期次；存量合同本次收租时间跨期后，账期从收租日次月起算，不会再出现「账期 2026-09 配收租 2029-02」的错配
+- **生成可见性（v1.2.2）**：生成成功后自动清除筛选并跳回账单页；筛选致空时提供「清除筛选，查看全部」一键恢复
+- **版本号与自动更新（v1.3.0）**：顶栏常驻版本号，「关于与更新」里可检查 / 立即更新 / 恢复内置版本；默认自包含版从 GitHub 拉取 sha256 校验过的更新包写入 `data/app`，更新前自动快照、失败可一键回滚
 - **数据备份**：完整 JSON 导入导出、NAS 自动快照、快照下载、一键备份脚本
 - **界面**：深绿 × 象牙白 × 香槟金双主题、顶栏 + 右上角悬浮双入口切换、六张主表批量删除、桌面通知提醒、键盘与焦点可访问性
 
@@ -55,6 +57,9 @@
 
 ```
 nestledger/
+├─ VERSION                       # 【版本号单一真源】改版本先改它
+├─ update/
+│  └─ latest.json                # 自动更新包（压缩应用代码 + sha256，由 sync-version 生成）
 ├─ web/
 │  └─ index.html              # 整个前端（单文件，零外部资源）
 ├─ server/
@@ -65,14 +70,17 @@ nestledger/
 ├─ docker-compose.standalone.yml  # 与上面内容逐字相同的兼容副本
 ├─ docker-compose.build.yml       # 源码构建版（含 build，需要完整项目目录）
 ├─ docker-compose.image.yml       # GHCR 纯镜像版，GUI 粘贴 YAML 专用
+├─ docker-compose.autoupdate.yml  # GHCR 镜像 + Watchtower，Actions 推镜像后自动重建容器
 ├─ .env.example                   # 配置模板（只有源码构建版会读 .env）
 ├─ scripts/
 │  ├─ predeploy.sh            # 部署前置自检（NAS 上先跑它）
 │  ├─ gen-standalone.mjs      # 重建主 compose 与兼容副本（改前端后必跑）
+│  ├─ sync-version.mjs        # 版本号同步 + 重建 update/latest.json
 │  ├─ test-standalone.mjs     # 真实启动验证内联包与主要接口
 │  ├─ check.mjs               # 项目自检（语法 / 外链 / 配置），CI 也在跑
 │  ├─ smoke.mjs               # 接口冒烟测试（本地起服务验证读写/快照/鉴权）
-│  ├─ test-bills.mjs          # 账单期次回归测试（含旧版错位账单清理）
+│  ├─ test-bills.mjs          # 账单期次与生成可见性回归测试（83 项）
+│  ├─ test-update.mjs         # 自动更新链路回归（本地假更新源，54 项）
 │  ├─ backup.sh               # 打包 data 目录
 │  └─ restore.sh              # 从备份包恢复
 ├─ docs/
@@ -85,7 +93,8 @@ nestledger/
 └─ LICENSE                    # MIT
 ```
 
-容器只做两件事：托管一个网页、读写一个 JSON 文件。**没有数据库、没有 npm 包、没有外网调用**，升级和排障都很轻。
+容器只做两件事：托管一个网页、读写一个 JSON 文件。**没有数据库、没有 npm 包**，升级和排障都很轻。
+v1.3.0 起默认自包含版会定期访问 GitHub 检查更新（可用 `UPDATE_OFF=1` 彻底关闭），业务数据始终不上传。
 
 ---
 
@@ -94,6 +103,8 @@ nestledger/
 ### 方式 A · 双击即用（不装任何东西）
 
 直接打开 `web/index.html`。此时是纯本地模式，数据存浏览器，零网络请求。
+
+> 顶栏会显示当前版本号（如 `v1.3.0`）。单文件版为保证零网络请求**不提供自动更新**，升级时到 GitHub 下载最新 `web/index.html` 覆盖本文件即可。
 
 ### 方式 B · 本机 Node（不装 Docker）
 
@@ -118,7 +129,7 @@ docker compose up -d
 ```
 
 > ✅ 在飞牛 GUI 里用「粘贴 YAML」创建项目时，直接全选复制 `docker-compose.yml`
-> 的整份内容粘贴即可（约 64 KB）。不要加 `--build`，也不要再找 Dockerfile。
+> 的整份内容粘贴即可（约 75 KB）。不要加 `--build`，也不要再找 Dockerfile。
 > 如果仍报 `failed to read dockerfile`，说明项目里用的还是旧版 compose 内容，
 > 用当前版本的 `docker-compose.yml` 整体替换即可。
 
@@ -126,6 +137,8 @@ docker compose up -d
 的请改用源码构建版 `docker-compose.build.yml`（见部署章节方式三）。
 
 首次启动服务端没有数据，网页会把浏览器里已有的数据（或示例数据）自动迁移到 `./data/db.json`。之后所有设备访问同一地址，看到的都是这一份。
+
+> 🔄 **v1.3.0 起，这是最后一次需要手动粘贴 YAML**：容器自带版本号与自动更新，之后在 GitHub 改代码、Actions「Build and Publish Image」跑完，网页会自己升级。详见 [更新与维护](#更新与维护)。
 
 ---
 
@@ -160,7 +173,7 @@ git push -u origin main
 
 **方式一：fnOS 图形界面粘贴 YAML（推荐，零文件、零 GitHub）**
 
-1. 打开 `docker-compose.yml`，**全选复制整份内容**（约 64 KB，大部分是一行应用包）
+1. 打开 `docker-compose.yml`，**全选复制整份内容**（约 75 KB，大部分是一行应用包）
 2. 飞牛 **Docker → Compose → 新增项目 → 粘贴 YAML**，项目名 `nestledger`，启动
 3. 访问 `http://<NAS 的 IP>:8787`
 
@@ -204,12 +217,14 @@ docker compose -f docker-compose.build.yml up -d --build
 
 前提：已完成 GitHub 推送，GHCR 镜像可用且为 Public。
 
-1. 复制 `docker-compose.image.yml` 全部内容，把 `image: ghcr.io/yourname/nestledger:latest` 中的 `yourname` 换成你的 GitHub 用户名
+1. 复制 `docker-compose.image.yml` 全部内容（已指向 `ghcr.io/lq-wq/nestledger:latest`；fork 到其他账号时把 `lq-wq` 换成你的用户名）
 2. 在飞牛 **Compose → 新增项目** 里选择「粘贴 YAML / 编辑 compose」，粘贴后启动
 3. 访问 `http://<NAS 的 IP>:8787`
 
 这个模式同样不执行 `docker build`，不需要 NAS 上有任何源码文件。已推 GitHub 的话，
 它比方式一更便于长期更新（点「拉取 / 更新」即可）。
+
+想让 Actions 推完镜像后**完全自动**重建容器，改用 `docker-compose.autoupdate.yml`（多一个 Watchtower 容器，需 NAS 允许挂载 `docker.sock`）。两条自动更新通道的区别见 [更新与维护](#更新与维护)。
 
 > 不同 fnOS 版本的菜单名称略有差别，认准「Compose / 项目 / 堆栈」即可。
 > 目录结构示意、镜像加速配置与完整排障见 [docs/飞牛NAS部署.md](docs/飞牛NAS部署.md)。
@@ -242,7 +257,28 @@ nestledger/data/
 
 ## 更新与维护
 
-**默认自包含版（方式一 / 二）**
+### 网页端自动更新（v1.3.0 起，默认自包含版）
+
+**链路**：在 GitHub 改代码并 push → `.github/workflows/release.yml` 的 **Build and Publish Image** 跑 `check.mjs` 一致性门禁、推送 GHCR 镜像、发布 `update/latest.json` → NAS 上的服务端每 6 小时（或你在网页点「检查更新」）拉取这份清单 → 校验 sha256 / 文件体积 / 版本标记 / 服务端语法 → 写入 `./data/app` 覆盖层 → 前端立即生效，服务端代码有变化才重启容器。
+
+**网页操作**：点顶栏的版本号（如 `v1.3.0`；有新版时旁边有红点）→「关于与更新」→ **检查更新** / **更新到 vX** / 自动更新开关 / **恢复内置版本**。弹窗里能同时看到当前版本、容器内置版本、覆盖层版本、运行模式、更新来源与最近检查时间。
+
+**安全网**：更新前自动生成一次 `data/backups/` 数据快照；旧覆盖层留一份 `previous/`；坏包（sha256 不符、体积异常、版本号不一致、服务端语法错误）一律拒绝安装且不留残留文件；服务端变化才重启，并有「10 分钟内最多 2 次」防循环保护；任何时候都能一键回滚到容器内置版本。业务数据始终在 `data/db.json`，不参与更新。
+
+| 变量（写在主 compose 的 `environment`） | 默认 | 说明 |
+| --- | --- | --- |
+| `UPDATE_AUTO` | `1` | 发现新版自动应用；改 `0` 则只提示、需手动点「更新到 vX」 |
+| `UPDATE_AUTO_RESTART` | `1` | 服务端代码变化后自动重启容器；改 `0` 需手动重启 |
+| `UPDATE_INTERVAL` | `21600` | 自动检查间隔（秒），默认 6 小时 |
+| `UPDATE_TIMEOUT` | `8000` | 单个更新源超时（毫秒） |
+| `UPDATE_MANIFEST_URL` | 空 | 自定义更新清单地址。国内访问 GitHub 不稳定时填可达的镜像；配合 `UPDATE_ONLY_CUSTOM=1` 可禁止回退到 GitHub |
+| `UPDATE_OFF` | `1` 表示关闭 | 彻底关闭联网检查（镜像版 / 源码构建版已默认设置） |
+
+> 服务端默认按 **jsDelivr → raw.githubusercontent → Release asset** 多源回退；把 `UPDATE_MANIFEST_URL` 指向 Actions 发布的 `https://github.com/lq-wq/nestledger/releases/download/latest/latest.json`，还能实现「只有 CI 全部通过才更新」。
+>
+> ⚠️ **升级到 v1.3.0 是最后一次手动替换 YAML**：把新版 `docker-compose.yml` 整份粘贴进飞牛 Compose 项目并启动即可，`./data` 不动、数据不丢。镜像版 / 源码构建版仍由容器层或 `git pull --build` 更新，它们设了 `UPDATE_OFF=1`。
+
+**默认自包含版（方式一 / 二）· 开发者手动重建**
 
 改完 `web/index.html` 或 `server/index.js` 后，在本机执行：
 
@@ -278,7 +314,9 @@ bash scripts/predeploy.sh          # NAS 上：部署前置自检（自动识别
 node scripts/check.mjs            # 语法、外链、品牌、compose 配置等静态自检
 node scripts/smoke.mjs            # 起两个临时服务，验证读写 / 快照 / 鉴权
 node scripts/test-standalone.mjs  # 真实启动验证内联包与主要接口
-node scripts/test-bills.mjs       # 账单期次与收租时间回归（63 项）
+node scripts/sync-version.mjs     # 改版本号后同步四处并重建更新包
+node scripts/test-bills.mjs       # 账单期次与生成可见性回归（83 项）
+node scripts/test-update.mjs      # 自动更新链路回归（54 项）
 ```
 
 打版本标签（`git tag v1.2.0 && git push origin v1.2.0`）会触发 Actions 生成带版本号的镜像，方便回滚到指定版本。
@@ -290,6 +328,8 @@ node scripts/test-bills.mjs       # 账单期次与收租时间回归（63 项�
 > **v1.2.1 升级提示**：本次修复只影响「升级后新生成」的账单。若升级前已生成过账期与收租时间错位的账单，
 > 到「租金账单」→「批量生成账单」→「旧版错位账单」选 **清理（推荐）** 再确认，
 > 即可删除未收款的错位账单并按新规则重建；已收 / 部分收款 / 有备注的账单不会被删。
+>
+> **v1.2.2**：修复「删空账单后重新生成却看不到」——生成后会自动清除筛选并跳回账单页，详见下方常见问题。
 
 ---
 
@@ -304,6 +344,10 @@ node scripts/test-bills.mjs       # 账单期次与收租时间回归（63 项�
 | `MAX_BODY` | `67108864` | 单次请求上限（字节），默认 64 MB |
 | `AUTH_USER` / `AUTH_PASS` | 空 | 同时填写才启用 HTTP Basic 认证 |
 | `BASE_IMAGE` | `node:22-alpine` | 源码构建时的基础镜像；国内 NAS 拉不到 Docker Hub 时换成可用地址 |
+| `UPDATE_AUTO` | `1` | 网页端发现新版后自动应用；`0` 只提示 |
+| `UPDATE_INTERVAL` | `21600` | 自动检查间隔（秒） |
+| `UPDATE_MANIFEST_URL` | 空 | 自定义更新清单地址（国内网络不稳时用镜像） |
+| `UPDATE_OFF` | `1` 关闭 | 彻底关闭联网检查，只改主 compose 的 `environment` |
 
 **默认主文件 `docker-compose.yml` 不读 `.env`**：上表变量请直接改 YAML 里的
 `ports`（端口）与 `environment`（TZ / BACKUP_KEEP / MAX_BODY / AUTH_USER 等）。
@@ -364,6 +408,24 @@ NAS 上的 `data/db.json` 是权威副本，首次连接会以它为准。想用
 把「旧版错位账单」保持 **清理（推荐）** 再确认即可：删除未收款、无备注的错位账单并按新规则重建，
 已收 / 部分收款 / 有备注 / 手工编辑过的账单一律保留。想逐条处理就选「保留」后手动删除。
 详见 `docs/飞牛NAS部署.md` 第 8 节。
+
+**Q：提示「已生成账单」，但租金账单页看不到？**  
+v1.2.1 及更早版本会保留账单页的筛选状态：删空账单后原先选中的月份从下拉里消失，界面显示「全部月份」而内部筛选值仍在，新账单就被静默过滤了；新账期从收租日次月起算，筛选「当月」同样看不到。
+**v1.2.2 起，生成成功后会自动清除筛选并跳回账单页**。若升级前已经生成过：进「租金账单」页点 **清除筛选，查看全部**，
+或再点一次「批量生成账单」（不会重复生成）即可看到。
+另外，合同「本次租金」标为 **已收讫** 时本期不生成待收账单，会从下一期开始；需要连本期一起生成就把「本次租金」改为 **待收**。
+
+**Q：怎么知道当前跑的是哪个版本？想手动升级怎么办？**  
+看顶栏右上角的版本号按钮（如 `v1.3.0`）。点开「关于与更新」能看到当前版本、内置版本、覆盖层版本与更新来源；点 **检查更新**，有新版时按钮会变成 **更新到 vX**。有新版时版本号旁边会出现红点。单文件本地版（`file://`）只显示版本号，不联网、不自动更新。
+
+**Q：一直提示「更新检查未成功」，影响使用吗？**  
+不影响，业务功能与数据完全照常。常见原因是 NAS 访问 GitHub 超时。可在主 compose 的 `environment` 加 `UPDATE_MANIFEST_URL` 指向国内可达的更新清单镜像；或设 `UPDATE_AUTO: 0` 只手动检查，甚至 `UPDATE_OFF: 1` 彻底关闭。检查失败不会写入任何文件。
+
+**Q：自动更新会不会覆盖我的房源 / 账单数据？**  
+不会。更新只写 `data/app` 里的 `web/index.html` 与 `server/index.js`，业务数据始终在 `data/db.json`；更新前还会额外生成一次 `data/backups/` 快照。若更新后界面异常，点「关于与更新」→ **恢复内置版本** 即可回到容器自带版本，数据不受影响。
+
+**Q：用 GHCR 镜像部署，为什么「关于与更新」说由容器管理版本？**  
+镜像版的版本号跟镜像走，网页端自动更新会与镜像版本打架，所以 `docker-compose.image.yml` / `docker-compose.autoupdate.yml` / `docker-compose.build.yml` 都设了 `UPDATE_OFF: 1`。Actions 推完新镜像后，在飞牛 Compose 点「拉取 / 更新」，或用 `docker-compose.autoupdate.yml` 里的 Watchtower 自动重建容器即可。
 
 ---
 
