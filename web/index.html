@@ -462,6 +462,23 @@ tbody tr.is-picked>td{background:var(--accent-soft)}
   .brand{padding:14px 16px}
 }
 
+
+/* ---- 版本与自动更新 ---- */
+.ver-chip{display:inline-flex;align-items:center;gap:7px;height:32px;padding:0 11px;border:1px solid var(--border);border-radius:var(--radius-btn);background:var(--surface-2);color:var(--sub);font-size:11.5px;font-weight:650;letter-spacing:.02em;white-space:nowrap;cursor:pointer;font-family:inherit}
+.ver-chip:hover{border-color:var(--accent);color:var(--accent)}
+.ver-chip.has-update{border-color:var(--accent);color:var(--accent);background:var(--surface)}
+.ver-dot{width:7px;height:7px;border-radius:50%;background:var(--danger);display:inline-block;box-shadow:0 0 0 3px var(--danger-bg)}
+.upd-hero{display:flex;align-items:center;gap:14px;padding:15px 17px;border:1px solid var(--border);border-radius:var(--radius-btn);background:var(--surface-2);margin-bottom:16px}
+.upd-hero .upd-name{font-size:15px;font-weight:650;letter-spacing:.05em}
+.upd-hero .upd-desc{font-size:11.5px;color:var(--muted);margin-top:3px}
+.upd-hero .upd-ver{margin-left:auto;font-size:13px;font-weight:700;color:var(--accent);white-space:nowrap}
+.upd-grid{display:grid;grid-template-columns:98px 1fr;gap:9px 14px;font-size:12.5px;line-height:1.6;padding:2px 0 4px}
+.upd-grid>div:nth-child(odd){color:var(--muted)}
+.upd-grid>div:nth-child(even){color:var(--ink);word-break:break-all}
+.upd-actions{display:flex;flex-wrap:wrap;gap:9px;align-items:center;margin-top:16px}
+.upd-note{font-size:11.5px;line-height:1.75;color:var(--muted);margin-top:14px}
+.upd-note code{background:var(--surface-2);padding:1px 5px;border-radius:4px;font-size:11px}
+@media(max-width:760px){.upd-grid{grid-template-columns:82px 1fr}}
 </style>
 </head>
 <body>
@@ -509,6 +526,7 @@ tbody tr.is-picked>td{background:var(--accent-soft)}
 var APP_NAME = '栖间';
 var APP_NAME_EN = 'NestLedger';
 var STORE_KEY = 'rental_manager_db_v1';
+var APP_VERSION='1.3.0';  /* 由 scripts/sync-version.mjs 维护 */
 /* 界面主题偏好单独存放：不进入业务数据 db，也不写入 JSON 备份 */
 var THEME_KEY = 'rental_manager_theme_v1';
 var currentTheme = 'light';
@@ -1103,8 +1121,10 @@ function makeBillsFor(d, throughMonth){
     var baseM=billStartMonth(c);           // 账期与收租时间共用的期次基准
     var endM=String(c.endDate||'').slice(0,7);
     if(!/^\d{4}-\d{2}$/.test(baseM)) return;
-    // 本次收租时间收的是下一期，即使「生成至账期」选在当月也要至少生成这一期
-    var through=throughMonth<baseM?baseM:throughMonth;
+    // 起始期必须至少生成一笔：即使「生成至账期」选在当月，或本次租金已收讫而从 k=1 起算，
+    // 也不能因为 through 太小而一笔都不生成（否则删空账单后会「提示生成却看不到」）。
+    var firstPeriod=addMonths(baseM,k*span);
+    var through=throughMonth<firstPeriod?firstPeriod:throughMonth;
     while(k<240){
       var period=addMonths(baseM,k*span);  // 期首月：从本次收租时间对应期开始推进
       if(period>through || (endM && period>endM)) break;
@@ -1124,6 +1144,22 @@ function makeBillsFor(d, throughMonth){
     }
   });
   return created;
+}
+/* v1.2.2：生成账单后无条件回到账单页，并清除残留筛选 / 勾选。
+   旧行为下，若此前按月份、状态或关键词筛选过（尤其删空账单后该月份已从下拉里消失，
+   下拉显示「全部月份」而内部筛选值仍在），新生成的账单会被静默过滤掉，
+   出现「提示已生成账单，页面却空白」。 */
+function revealBills(){
+  state.f.bills={status:'all',month:'all',q:''};
+  state.sel.bill=[];
+  state.page='bills';
+}
+/* 月份下拉是动态生成的：账单被删除后，原先选中的月份可能已不在选项里，
+   此时 DOM 会显示第一项「全部月份」，内部筛选值却仍是旧月份，形成幽灵过滤。 */
+function validMonthFilter(f){
+  if(f && f.month && f.month!=='all' &&
+     !monthOptions().some(function(o){return o.value===f.month;})) f.month='all';
+  return f;
 }
 function pushTxn(type,category,amount,date,roomId,tenantId,ref,note){
   db.txns.unshift({id:uid(),type:type,category:category,amount:round2(amount),date:date,
@@ -2075,7 +2111,7 @@ function contractDetail(id){
 function viewBills(){
   topBtn('<button class="btn" data-act="export-csv">'+svg('download')+'导出账单 CSV</button>'+
          '<button class="btn btn-primary" data-act="go-gen">'+svg('plus')+'批量生成账单</button>');
-  var f=state.f.bills;
+  var f=validMonthFilter(state.f.bills);
   var list=db.bills.filter(function(b){
     if(f.status==='soon'){
       var d=daysUntil(b.dueDate);
@@ -2105,22 +2141,24 @@ function viewBills(){
   var staleN=Object.keys(misalignedBillIds(db)).length;
   var staleHTML=staleN?'<div class="form-note warn" style="margin:0 0 12px">检测到 <b>'+staleN+
     '</b> 笔旧版错位账单（账期与收租时间不匹配）。点右上角「批量生成账单」并选「清理（推荐）」即可删除这些未收款账单、按新规则重建；已收账单与手工编辑过的账单不受影响。</div>':'';
+  var filterHTML=(!list.length && db.bills.length)?'<div class="form-note warn" style="margin:0 0 12px">当前筛选条件下没有账单（库内共 '+db.bills.length+
+    ' 笔）。<button class="link" data-act="clear-bill-filter">清除筛选，查看全部</button></div>':'';
   document.getElementById('view').innerHTML='<div class="card"><div class="card-head"><h2>租金账单 <span class="hint">共 '+db.bills.length+' 笔</span></h2></div>'+
-    '<div class="card-body" style="padding-bottom:4px">'+staleHTML+'<div class="filters">'+
+    '<div class="card-body" style="padding-bottom:4px">'+staleHTML+filterHTML+'<div class="filters">'+
       selectFilter('bills','status',[{value:'all',label:'全部状态'},{value:'未收',label:'未收'},{value:'部分',label:'部分收款'},{value:'已收',label:'已收'},{value:'逾期',label:'逾期'},{value:'soon',label:'近 '+leadDays()+' 天到期 / 逾期'}],f.status,'状态')+
       selectFilter('bills','month',monthOptions(),f.month,'账期')+
       searchBox('bills','搜索租客 / 房号 / 账期',f.q)+
     '</div></div>'+strip+
-    tableHTML([{title:'房间'},{title:'租客'},{title:'账期'},{title:'收租时间'},{title:'应收金额',num:true},{title:'已收金额',num:true},{title:'待收',num:true},{title:'状态'},{title:'收款日期'},{title:'操作',num:true}],rows,'没有符合条件的账单，可用右上角「批量生成账单」按合同自动生成。','bill')+'</div>';
+    tableHTML([{title:'房间'},{title:'租客'},{title:'账期'},{title:'收租时间'},{title:'应收金额',num:true},{title:'已收金额',num:true},{title:'待收',num:true},{title:'状态'},{title:'收款日期'},{title:'操作',num:true}],rows,'没有符合条件的账单：请先清除筛选条件，或用右上角「批量生成账单」按合同自动生成。','bill')+'</div>';
 }
 function genBillsDialog(){
   var staleN=Object.keys(misalignedBillIds(db)).length;
   openForm({
     title:'批量生成租金账单',
     okText:'开始生成',
-    note:'系统会为所有<b>生效中 / 已到期</b>的合同逐期生成账单，直到所选月份为止。<b>账期与收租时间共用同一期次</b>：本次收租时间收的是紧接着的一个付款周期（账期从收租日次月开始），<b>每期收租时间 = 本次收租时间 + 付款周期 × 期数</b>（季付即每 3 个月的同一天）；新签合同首期账期仍取起租月。「本次租金」标为已收讫的合同从下一期开始生成，标为待收的从本期开始。已存在的账期会自动跳过，不会重复生成；超出合同到期日的账期不会生成。',
+    note:'系统会为所有<b>生效中 / 已到期</b>的合同逐期生成账单，直到所选月份为止。<b>账期与收租时间共用同一期次</b>：本次收租时间收的是紧接着的一个付款周期（账期从收租日次月开始），<b>每期收租时间 = 本次收租时间 + 付款周期 × 期数</b>（季付即每 3 个月的同一天）；新签合同首期账期仍取起租月。「本次租金」标为已收讫的合同从下一期开始生成，标为待收的从本期开始。已存在的账期会自动跳过，不会重复生成；超出合同到期日的账期不会生成。生成后会自动清除账单页筛选并跳转到租金账单页。',
     fields:[{key:'month',label:'生成至账期（含）',type:'month',required:true,def:curMonth(),full:true,
-      tip:'例如选择当月，会生成到当月为止的账单；本次收租时间对应的下一期账单始终会生成'},
+      tip:'例如选择当月，会生成到当月为止的账单；合同起始期（本次收租时间对应的那一期）始终至少生成一笔'},
       {key:'cleanStale',label:'旧版错位账单',type:'select',options:['清理（推荐）','保留'],
        def:'清理（推荐）',full:true,
        tip:'旧版会把账期与收租时间错开（如账期 2026-09 配收租 2029-02）。选「清理」将删除未收款、无备注的错位账单后按新规则重建；已收账单与手工编辑过的账单不动。'+
@@ -2128,8 +2166,8 @@ function genBillsDialog(){
     onSubmit:function(v){
       var removed=(v.cleanStale!=='保留') ? removeMisalignedBills(db) : 0;
       var n=makeBillsFor(db,v.month);
-      save(); render();
-      var msg=n>0?'已生成 '+n+' 笔账单':'该期间账单已全部存在，无需重复生成';
+      save(); revealBills(); render();
+      var msg=n>0?'已生成 '+n+' 笔账单，已切到租金账单页':'本次没有新增账单：所选期间已生成过，或已超出合同到期日';
       if(removed) msg+='；已清理 '+removed+' 笔旧版错位账单';
       toast(msg,(n>0||removed)?'ok':'');
     }
@@ -2139,7 +2177,7 @@ function genBillsDialog(){
 /* ---------- 财务流水 ---------- */
 function viewTxns(){
   topBtn('<button class="btn btn-primary" data-act="add-txn">'+svg('plus')+'记一笔收支</button>');
-  var f=state.f.txns;
+  var f=validMonthFilter(state.f.txns);
   var list=db.txns.filter(function(t){
     if(f.type!=='all' && t.type!==f.type) return false;
     if(f.month!=='all' && t.date.slice(0,7)!==f.month) return false;
@@ -2578,6 +2616,13 @@ document.addEventListener('click',function(e){
   if(!el) return;
   var id=el.getAttribute('data-id');
   switch(act){
+    case 'open-about': aboutDialog(); break;
+    case 'upd-check': updCheck(true); break;
+    case 'upd-apply': updApply(); break;
+    case 'upd-config': updConfig(el.getAttribute('data-key'),el.getAttribute('data-val')); break;
+    case 'upd-rollback': updRollback(); break;
+    case 'upd-restart': updRestart(); break;
+
     case 'set-theme': setTheme(el.getAttribute('data-theme')); break;
     case 'toggle-theme': setTheme(currentTheme==='dark'?'light':'dark'); break;
     case 'bulk': doBulk(el.getAttribute('data-page'),el.getAttribute('data-op')); break;
@@ -2611,6 +2656,7 @@ document.addEventListener('click',function(e){
     case 'attach-preview-download': downloadAttachment(window.__previewAttachment); break;
     case 'terminate-contract': terminateContract(id); break;
     case 'go-gen': genBillsDialog(); break;
+    case 'clear-bill-filter': state.f.bills={status:'all',month:'all',q:''}; render(); break;
     case 'gen-bills-for': {
       var c=getContract(id); if(!c) break;
       var saved=db.contracts;
@@ -2621,8 +2667,8 @@ document.addEventListener('click',function(e){
       var before=db.bills.length;
       try{ db.contracts=[c]; makeBillsFor(db,through); }
       finally{ db.contracts=saved; }
-      var n=db.bills.length-before; save(); modalClose(); render();
-      var msg=n>0?'已为该合同生成 '+n+' 笔账单':'账单已全部存在，无需重复生成';
+      var n=db.bills.length-before; save(); modalClose(); revealBills(); render();
+      var msg=n>0?'已为该合同生成 '+n+' 笔账单，已切到租金账单页':'本次没有新增账单：该期间已生成过，或已超出合同到期日';
       if(removed) msg+='；已清理 '+removed+' 笔旧版错位账单';
       toast(msg,(n>0||removed)?'ok':'');
       break;
@@ -2731,9 +2777,223 @@ document.addEventListener('submit',function(e){ if(e.target.id==='genForm'){ e.p
 document.addEventListener('scroll',repositionRowMenu,true);
 if(window.addEventListener) window.addEventListener('resize',repositionRowMenu);
 
+
+/* ---------------- 版本与自动更新 ----------------
+   APP_VERSION 由 scripts/sync-version.mjs 注入并维护。
+   NAS 模式：调用本服务端 /api/update/*，由服务端去 GitHub 拉取更新包。
+   单文件本地模式：只显示版本号，绝不发起任何网络请求。
+   ------------------------------------------------ */
+var upd={
+  mode:'local',version:APP_VERSION,builtin:APP_VERSION,overlay:null,
+  latest:null,hasUpdate:false,auto:true,autoRestart:true,enabled:false,
+  lastCheck:'',lastError:'',source:'',lastApplied:null,
+  checking:false,applying:false,checked:false
+};
+function updServerMode(){ return location.protocol==='http:'||location.protocol==='https:'; }
+function updFetch(url,opt,timeout){
+  opt=opt||{};
+  if(typeof fetch!=='function') return Promise.reject(new Error('浏览器不支持 fetch'));
+  var ctl=(typeof AbortController==='function')?new AbortController():null;
+  if(ctl) opt.signal=ctl.signal;
+  var timer=setTimeout(function(){ if(ctl){ try{ctl.abort();}catch(e){} } },timeout||12000);
+  return fetch(url,opt).then(function(r){
+    clearTimeout(timer);
+    if(!r.ok) throw new Error('HTTP '+r.status);
+    return r.json();
+  },function(e){ clearTimeout(timer); throw e; });
+}
+function updFmt(t){
+  if(!t) return '';
+  var d=new Date(t);
+  if(isNaN(d.getTime())) return String(t);
+  function p(n){ return String(n).padStart(2,'0'); }
+  return d.getFullYear()+'-'+p(d.getMonth()+1)+'-'+p(d.getDate())+' '+p(d.getHours())+':'+p(d.getMinutes())+':'+p(d.getSeconds());
+}
+function updPost(p,body,timeout){
+  return updFetch(p,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body||{})},timeout||120000);
+}
+function refreshUpdChip(){
+  var el=document.getElementById('verChip'); if(!el) return;
+  el.className='ver-chip'+(upd.hasUpdate?' has-update':'');
+  el.innerHTML='<span>v'+esc(upd.version)+'</span>'+(upd.hasUpdate?'<i class="ver-dot"></i>':'');
+  el.setAttribute('title',upd.hasUpdate
+    ?('发现新版本 v'+((upd.latest&&upd.latest.version)||'')+' · 点击查看并更新')
+    :('栖间 · NestLedger v'+upd.version+' · 查看关于与更新'));
+}
+function mountVerChip(){
+  var host=document.querySelector('.top-right');
+  if(!host||document.getElementById('verChip')) return;
+  var b=document.createElement('button');
+  b.type='button'; b.id='verChip'; b.className='ver-chip';
+  b.setAttribute('data-act','open-about'); b.setAttribute('aria-label','关于与更新');
+  host.insertBefore(b,host.firstChild);
+  refreshUpdChip();
+}
+function updApplyStatus(s){
+  if(!s||typeof s!=='object') return;
+  upd.enabled=!!s.enabled;
+  upd.builtin=s.builtin||upd.builtin;
+  upd.overlay=s.overlay||null;
+  upd.version=s.current||upd.version;
+  upd.auto=s.auto!==false;
+  upd.autoRestart=s.autoRestart!==false;
+  upd.lastCheck=s.lastCheck||'';
+  upd.lastError=s.lastError||'';
+  upd.source=s.source||'';
+  upd.latest=s.latest||null;
+  upd.hasUpdate=!!s.hasUpdate;
+  upd.lastApplied=s.lastApplied||null;
+  upd.checked=true;
+  refreshUpdChip();
+  if(document.getElementById('updPanel')) updRenderPanel();
+}
+function updStatus(){
+  if(!updServerMode()) return Promise.resolve(null);
+  return updFetch('/api/update/status',{},8000).then(function(s){ updApplyStatus(s); return s; })
+    .catch(function(){ upd.enabled=false; refreshUpdChip(); return null; });
+}
+function updCheck(force){
+  if(!updServerMode()){ toast('单文件本地版不联网，请手动下载新版 HTML',''); return; }
+  if(upd.checking||upd.applying) return;
+  upd.checking=true; upd.lastError=''; updRenderPanel();
+  updFetch('/api/update/check'+(force?'?force=1':''),{},30000).then(function(r){
+    upd.checking=false;
+    updApplyStatus(r);
+    upd.lastError=r.error||'';
+    refreshUpdChip();
+    if(r.error){ if(force) toast('检查失败：'+upd.lastError,'err'); }
+    else if(r.hasUpdate) toast('发现新版本 v'+r.latest.version,'ok');
+    else if(force) toast('已是最新版本','ok');
+    updRenderPanel();
+  }).catch(function(e){
+    upd.checking=false; upd.lastError=(e&&e.message)||String(e);
+    updRenderPanel(); toast('检查更新失败：'+upd.lastError,'err');
+  });
+}
+function updWaitReload(){
+  var n=0, t=setInterval(function(){
+    n++;
+    updFetch('/api/health',{},3000).then(function(){ clearInterval(t); location.reload(); }).catch(function(){});
+    if(n>30){ clearInterval(t); location.reload(); }
+  },2000);
+}
+function updApply(){
+  if(upd.applying) return;
+  upd.applying=true; upd.lastError=''; updRenderPanel();
+  updPost('/api/update/apply',{},180000).then(function(r){
+    upd.applying=false;
+    if(r.error) throw new Error(r.error);
+    if(r.already){ upd.applying=false; updRenderPanel(); toast('已是最新版本','ok'); return; }
+    toast('已更新到 v'+r.version+(r.restarting?'，容器即将重启':''),'ok');
+    if(r.restarting) setTimeout(updWaitReload,3000);
+    else setTimeout(function(){ location.reload(); },1200);
+  }).catch(function(e){
+    upd.applying=false; upd.lastError=(e&&e.message)||String(e);
+    updRenderPanel(); toast('更新失败：'+upd.lastError,'err');
+  });
+}
+function updConfig(key,val){
+  var body={}; body[key]=(val==='1');
+  updPost('/api/update/config',body,10000).then(function(s){ updApplyStatus(s); toast('设置已保存','ok'); })
+    .catch(function(e){ toast('保存失败：'+((e&&e.message)||String(e)),'err'); });
+}
+function updRollback(){
+  confirmBox('恢复内置版本','将删除已下载的更新覆盖层，回到容器内置的 <b>v'+esc(upd.builtin)+'</b>。<br><br>业务数据 <code>data/db.json</code> 完全不受影响。',function(){
+    updPost('/api/update/rollback',{},20000).then(function(r){
+      if(r.error) throw new Error(r.error);
+      modalClose(); toast('已恢复内置版本','ok');
+      if(r.restarting) setTimeout(updWaitReload,3000); else setTimeout(function(){ location.reload(); },1500);
+    }).catch(function(e){ toast('恢复失败：'+((e&&e.message)||String(e)),'err'); });
+  },true);
+}
+function updRestart(){
+  updPost('/api/update/restart',{},10000).then(function(r){
+    if(r.error) throw new Error(r.error);
+    modalClose(); toast('正在重启容器…','ok'); setTimeout(updWaitReload,3000);
+  }).catch(function(e){ toast('重启失败：'+((e&&e.message)||String(e)),'err'); });
+}
+function updBodyHTML(){
+  var rows='';
+  function row(k,v){ rows+='<div>'+k+'</div><div>'+v+'</div>'; }
+  row('当前版本','<b>v'+esc(upd.version)+'</b>'+(upd.overlay&&upd.overlay!==upd.builtin?' · 由自动更新覆盖层提供':' · 容器内置'));
+  row('运行模式',upd.mode==='server'?'NAS / Docker 服务端':'单文件本地版');
+  row('内置版本','v'+esc(upd.builtin)+(upd.overlay?' · 覆盖层 v'+esc(upd.overlay):''));
+  row('更新来源',upd.mode==='server'?esc(upd.source||'GitHub · lq-wq/nestledger'):'不联网');
+  row('最近检查',upd.lastCheck?esc(updFmt(upd.lastCheck)):'尚未检查');
+  var notice='';
+  if(upd.mode!=='server'){
+    notice='<div class="notice"><div>当前是<b>单文件本地版</b>（<code>file://</code>），数据只存在本机浏览器，为保证零网络请求，<b>不提供自动更新</b>。<br>需要升级时，到 GitHub 仓库 <code>lq-wq/nestledger</code> 下载最新的 <code>web/index.html</code> 覆盖本文件即可，业务数据不受影响。</div></div>';
+  }else if(!upd.enabled&&upd.checked){
+    notice='<div class="notice"><div>本部署方式由<b>容器镜像</b>管理版本：GitHub 上 Actions 构建发布新镜像后，在飞牛 Compose 里点「拉取 / 更新」，或用 <code>docker-compose.autoupdate.yml</code> 的 Watchtower 自动完成。<br>当前网页端自动更新已关闭，避免与镜像版本冲突；业务数据不受影响。</div></div>';
+  }else if(upd.applying){
+    notice='<div class="notice"><div><b>正在下载并校验更新包…</b><br>更新前会自动生成一次数据快照，请勿关闭容器电源。</div></div>';
+  }else if(upd.checking){
+    notice='<div class="notice"><div><b>正在检查更新…</b></div></div>';
+  }else if(upd.hasUpdate&&upd.latest){
+    notice='<div class="notice"><div><b>发现新版本 v'+esc(upd.latest.version)+'</b>'+
+      (upd.latest.builtAt?' <span class="sub-txt">（发布于 '+esc(updFmt(upd.latest.builtAt))+'）</span>':'')+
+      '<br>'+esc(upd.latest.notes||'')+'</div></div>';
+  }else if(upd.lastError){
+    notice='<div class="notice danger"><div><b>更新检查未成功</b><br>'+esc(upd.lastError)+'<br>业务功能不受影响；可稍后重试，或在服务端配置 <code>UPDATE_MANIFEST_URL</code> 指定可达的更新源。</div></div>';
+  }else if(upd.checked){
+    notice='<div class="sub-txt" style="margin-top:14px">✓ 已是最新版本。</div>';
+  }
+  var cfg='';
+  if(upd.mode==='server'&&upd.enabled){
+    cfg='<div class="hr"></div><div class="upd-actions">'+
+      '<span class="sub-txt" style="margin-right:4px">检测到新版本时自动更新</span>'+
+      '<button class="btn btn-sm '+(upd.auto?'btn-primary':'')+'" data-act="upd-config" data-key="auto" data-val="'+(upd.auto?'0':'1')+'">'+(upd.auto?'已开启':'已关闭')+'</button>'+
+      '<span class="sub-txt" style="margin-left:10px;margin-right:4px">更新后自动重启容器</span>'+
+      '<button class="btn btn-sm '+(upd.autoRestart?'btn-primary':'')+'" data-act="upd-config" data-key="autoRestart" data-val="'+(upd.autoRestart?'0':'1')+'">'+(upd.autoRestart?'已开启':'已关闭')+'</button>'+
+      '</div>';
+  }
+  var extra='';
+  if(upd.mode==='server'&&upd.overlay){
+    extra='<div class="upd-note">如需回退，可恢复容器内置版本；<code>data/db.json</code> 与自动快照始终保留。<br>'+
+      '<button class="link" data-act="upd-rollback">恢复内置版本</button> · <button class="link" data-act="upd-restart">重启容器</button></div>';
+  }
+  return '<div id="updPanel">'+
+    '<div class="upd-hero"><div><div class="upd-name">栖间 · NestLedger</div><div class="upd-desc">房屋租赁与收租台账 · 自托管</div></div>'+
+    '<span class="upd-ver">v'+esc(upd.version)+'</span></div>'+
+    '<div class="upd-grid">'+rows+'</div>'+notice+cfg+extra+
+    '<div class="upd-note">更新包来自 GitHub 仓库 <code>lq-wq/nestledger</code>，由服务端校验 sha256 后写入 <code>data/app</code> 覆盖层；'+
+    '更新前自动生成数据快照，失败可一键回退。单文件本地版与 NAS 版共用同一份前端代码。</div>'+
+    '</div>';
+}
+function updFootHTML(){
+  var f='<button class="btn" data-act="modal-close">关闭</button>';
+  if(upd.mode==='server'&&upd.enabled){
+    f+='<button class="btn" data-act="upd-check"'+(upd.checking?' disabled':'')+'>'+(upd.checking?'检查中…':'检查更新')+'</button>';
+    if(upd.hasUpdate&&upd.latest) f+='<button class="btn btn-primary" data-act="upd-apply"'+(upd.applying?' disabled':'')+'>更新到 v'+esc(upd.latest.version)+'</button>';
+  }
+  return f;
+}
+function aboutDialog(){ showModal('关于与更新',updBodyHTML(),updFootHTML()); }
+function updRenderPanel(){ if(document.getElementById('updPanel')) aboutDialog(); }
+function initUpdate(){
+  mountVerChip();
+  if(!updServerMode()){
+    upd.mode='local'; upd.version=APP_VERSION; upd.builtin=APP_VERSION;
+    upd.checked=true; refreshUpdChip(); return;
+  }
+  upd.mode='server';
+  updStatus().then(function(s){
+    if(!s) return;
+    if(!s.lastCheck) updCheck(false);
+    if(s.lastApplied&&s.lastApplied.version===s.current&&(Date.now()-new Date(s.lastApplied.at).getTime()<86400000)){
+      var key='nestledger_updated_'+s.lastApplied.version;
+      try{ if(!sessionStorage.getItem(key)){ sessionStorage.setItem(key,'1'); toast('已更新到 v'+s.current,'ok'); } }catch(e){}
+    }
+  });
+  if(window.setInterval) setInterval(function(){
+    if(document.visibilityState!=='hidden') updStatus();
+  },1800000);
+}
+
 /* ---------------- 启动 ---------------- */
 document.title = APP_NAME+' · '+APP_NAME_EN+' · 房屋租赁台账';
 applyTheme(readTheme());
+initUpdate();
 fillDateChip();
 db=load();
 render();

@@ -73,7 +73,7 @@ if [ "$MODE" = standalone ] || [ "$MODE" = image ]; then
       echo "✗ APP_BUNDLE 这一行看起来不完整（$BUNDLE_LEN 字符，预期 > 50000）"
       echo "════════════════════════════════════════════════════════"
       echo "多半是复制粘贴时被截断了。请从 docker-compose.yml 全选复制整份内容"
-      echo "（约 64 KB），重新粘贴进飞牛 Compose 项目。"
+      echo "（约 75 KB），重新粘贴进飞牛 Compose 项目。"
       echo ""
       exit 1
     fi
@@ -83,7 +83,7 @@ if [ "$MODE" = standalone ] || [ "$MODE" = image ]; then
       echo "  ! image 里还是占位符 yourname，请换成你的 GitHub 用户名，"
       echo "    并确认 GitHub Actions 已构建并推送镜像。"
     else
-      echo "  ✓ image 地址已填写"
+      echo "  ✓ image 地址已填写（默认 ghcr.io/lq-wq/nestledger:latest）"
     fi
   fi
 
@@ -178,8 +178,10 @@ if [ "$MISSING" -gt 0 ]; then
     echo "     兼容副本 docker-compose.standalone.yml 内容完全相同。"
     echo "  B. 把整个项目文件夹（ZIP 解压后的 nestledger/ 里面的内容）上传到本目录，"
     echo "     或重新用 git clone 拉完整仓库，再重跑本脚本。"
-    echo "  C. 已推 GitHub 且 GHCR 镜像可用：粘贴 docker-compose.image.yml，"
-    echo "     并把 yourname 换成你的 GitHub 用户名。"
+    echo "  C. 已推 GitHub 且 GHCR 镜像可用：粘贴 docker-compose.image.yml"
+    echo "     （已指向 ghcr.io/lq-wq/nestledger:latest；fork 到其他账号时替换 lq-wq）。"
+    echo "  D. 想让 Actions 推完镜像后自动更新容器：用 docker-compose.autoupdate.yml"
+    echo "     （含 Watchtower，需要 NAS 允许挂载 docker.sock）。"
   fi
   echo ""
   exit 1

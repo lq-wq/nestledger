@@ -6,6 +6,7 @@
  *   - 「本次收租时间」与账期共用期次（用户截图场景 2026-12~2027-02 / 2026-11-24）
  *   - 新签合同兼容、四种付款方式、月末 / 跨年、已收讫、到期限制
  *   - 收款顺延、改合同后同步、旧版错位账单清理与重建、示例数据
+ *   - v1.2.2：删空账单后重新生成、起始期下界、筛选校正与生成后可见性
  * 只使用临时 vm 环境，不读写真实数据。
  */
 import fs from 'node:fs';
@@ -155,13 +156,51 @@ ok('示例数据生成账单', demo.bills.length > 0);
 ok('示例账单无荒谬收租时间', demo.bills.every(b => b.dueDate < '2030-01-01'));
 ok('示例账期均合法', demo.bills.every(b => /^\d{4}-\d{2}$/.test(b.period) && b.periodEnd >= b.period));
 
-// ---- 9. 静态口径 ----
+// ---- 9. v1.2.2 删空账单后重新生成的可见性 ----
+// 用户场景：手动删除全部账单 → 再点批量生成 → 提示已生成，页面却看不到
+setDB(emptyDB(contract()));
+eq('首次生成 1 笔', run("makeBillsFor(db,'2026-11')"), 1);
+run('db.bills=[];');
+eq('删空后重新生成仍 1 笔', run("makeBillsFor(db,'2026-11')"), 1);
+const rb = JSON.parse(run('JSON.stringify(db.bills[0])'));
+eq('重建账期', rb.period + ' ~ ' + rb.periodEnd, '2026-12 ~ 2027-02');
+eq('重建收租时间', rb.dueDate, '2026-11-24');
+
+// 本次已收讫时起始期是 k=1，生成下界必须一起抬高，否则生成至当月会一笔都不生成
+setDB(emptyDB(contract({ rentSettled: '已收讫' })));
+eq('已收讫删空后生成至当月仍生成 1 笔', run("makeBillsFor(db,'2026-11')"), 1);
+const sb = JSON.parse(run('JSON.stringify(db.bills[0])'));
+eq('已收讫首笔为下一期', sb.period + ' ~ ' + sb.periodEnd, '2027-03 ~ 2027-05');
+eq('已收讫首笔收租', sb.dueDate, '2027-02-24');
+
+// 幽灵月份筛选：账单删空后该月份已从下拉消失，内部值必须回落到 all
+setDB(emptyDB(contract()));
+run("makeBillsFor(db,'2026-11'); state.f.bills={status:'all',month:'1999-01',q:''};");
+eq('失效月份被校正为 all', run('validMonthFilter(state.f.bills).month'), 'all');
+run("state.f.bills={status:'all',month:'2026-12',q:''};");
+eq('有效月份予以保留', run('validMonthFilter(state.f.bills).month'), '2026-12');
+
+// 生成后清筛选、清勾选、跳账单页
+run("state.page='contracts'; state.sel.bill=['x']; state.f.bills={status:'逾期',month:'1999-01',q:'abc'}; revealBills();");
+eq('生成后回到账单页', run('state.page'), 'bills');
+eq('生成后状态筛选清空', run('state.f.bills.status'), 'all');
+eq('生成后月份筛选清空', run('state.f.bills.month'), 'all');
+eq('生成后关键词清空', run('state.f.bills.q'), '');
+eq('生成后勾选清空', run('state.sel.bill.length'), 0);
+
+// ---- 10. 静态口径 ----
 const html = fs.readFileSync(path.join(ROOT, FILE), 'utf8');
 ok('具备期次基准函数', html.includes('function billStartMonth('));
 ok('具备错位清理函数', html.includes('function removeMisalignedBills('));
 ok('批量生成含新口径', html.includes('账期与收租时间共用同一期次'));
 ok('批量生成含清理选项', html.includes("key:'cleanStale'"));
 ok('账单页含错位提示条', html.includes('var staleHTML='));
+ok('具备生成后可见性 helper', html.includes('function revealBills('));
+ok('具备失效月份校正', html.includes('function validMonthFilter('));
+ok('账单页使用月份校正', html.includes('var f=validMonthFilter(state.f.bills);'));
+ok('生成后清除筛选', html.includes('save(); revealBills(); render();'));
+ok('筛选致空提供一键清除', html.includes('var filterHTML=') && html.includes("case 'clear-bill-filter'"));
+ok('提示不再谎称账单已全部存在', !html.includes('该期间账单已全部存在，无需重复生成'));
 
 console.log('\n全部通过：' + pass + ' 项\n');
 process.exit(fail ? 1 : 0);

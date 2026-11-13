@@ -27,20 +27,38 @@ const bundle = zlib.brotliCompressSync(Buffer.from(JSON.stringify(files), 'utf8'
 }).toString('base64');
 
 // 容器启动器：只用 Node 内置模块，不依赖 tar / base64 / gzip 等外部命令。
-// APP_DIR 仅供本地验证时覆写，compose 里不设置，容器内恒为 /app。
+// APP_DIR / OVERLAY_DIR 仅供本地验证时覆写，compose 里不设置。
 const BOOT = `const fs = require('fs');
 const zlib = require('zlib');
 const path = require('path');
 const APP_DIR = process.env.APP_DIR || '/app';
+const OVERLAY_DIR = process.env.OVERLAY_DIR || (process.env.DATA_DIR ? path.join(process.env.DATA_DIR, 'app') : '/data/app');
+process.env.NESTLEDGER_CONTAINER = '1';
 const files = JSON.parse(zlib.brotliDecompressSync(
   Buffer.from(process.env.APP_BUNDLE, 'base64')
 ).toString('utf8'));
+const builtin = (files['server/index.js'].match(/const APP_VERSION = '([^']+)';/) || [])[1];
+if (builtin) process.env.NESTLEDGER_BUILTIN = builtin;
 for (const [name, content] of Object.entries(files)) {
   const dest = path.join(APP_DIR, name);
   fs.mkdirSync(path.dirname(dest), { recursive: true });
   fs.writeFileSync(dest, content, 'utf8');
 }
 console.log('[nestledger] 内联应用包已展开到 ' + APP_DIR);
+try {
+  const meta = JSON.parse(fs.readFileSync(path.join(OVERLAY_DIR, 'version.json'), 'utf8'));
+  if (meta && meta.version) {
+    for (const name of Object.keys(files)) {
+      const src = path.join(OVERLAY_DIR, name);
+      if (fs.existsSync(src)) {
+        const dest = path.join(APP_DIR, name);
+        fs.mkdirSync(path.dirname(dest), { recursive: true });
+        fs.copyFileSync(src, dest);
+      }
+    }
+    console.log('[nestledger] 已应用自动更新覆盖层 v' + meta.version);
+  }
+} catch (e) { /* 首次部署没有覆盖层，静默使用内置版 */ }
 require(path.join(APP_DIR, 'server/index.js'));`;
 
 const indent = (text, n) => text.split('\n').map(l => ' '.repeat(n) + l).join('\n');
@@ -64,14 +82,23 @@ const yaml = `# 栖间 · NestLedger —— 自包含版（默认主文件 · �
 #
 # ⚠️ 端口 / 口令 / 备份份数直接改下面的 ports 与 environment，本文件不读 .env。
 #
-# ⚠️ 更新应用：改完 web/index.html 或 server/index.js 后，在本机执行
+# 🔄 自动更新（v1.3.0 起）：容器内每 6 小时检查一次 GitHub 仓库的
+#    update/latest.json，校验 sha256 后把新版前端 / 服务端写入 ./data/app 覆盖层，
+#    更新前自动生成数据快照，网页顶栏版本号旁会出现更新提示。
+#    · UPDATE_AUTO: 0          只检查不自动应用（关掉自动更新，保留手动检查）
+#    · UPDATE_OFF: 1           彻底关闭联网检查
+#    · UPDATE_MANIFEST_URL     国内访问 GitHub 不稳定时，填可达的更新清单镜像地址
+#    · 网页「关于与更新」里可以手动检查、立即更新、恢复内置版本
+#    首次升级到 v1.3.0 仍需把本文件整体替换粘贴一次，之后就无需再碰 YAML。
+#
+# ⚠️ 开发者改完 web/index.html 或 server/index.js 后，在本机依次执行
+#    node scripts/sync-version.mjs
 #    node scripts/gen-standalone.mjs
 #    重新生成整个 YAML，再把新内容整体替换进飞牛 Compose 项目并重启。
 #    scripts/check.mjs 会检查内联包与源码是否一致。
 #
-# 想长期更省心（git pull / 换镜像即更新），可改用 docker-compose.build.yml
-# （源码构建，需完整项目目录）或 docker-compose.image.yml（GHCR 纯镜像）。
-# 详见 docs/飞牛NAS部署.md。
+# 想用 GHCR 镜像 + Watchtower 自动更新容器，改用 docker-compose.autoupdate.yml；
+# 想 git pull 后源码构建，改用 docker-compose.build.yml。详见 docs/飞牛NAS部署.md。
 services:
   nestledger:
     image: node:22-alpine
@@ -89,6 +116,14 @@ services:
       BACKUP_KEEP: 30
       BACKUP_ON_WRITE: 1
       MAX_BODY: 67108864
+      UPDATE_REPO: lq-wq/nestledger
+      UPDATE_BRANCH: main
+      UPDATE_AUTO: 1
+      UPDATE_AUTO_RESTART: 1
+      UPDATE_INTERVAL: 21600
+      # 彻底关闭自动更新：UPDATE_OFF: 1
+      # 国内连不上 GitHub 时填可达的更新清单镜像，例如：
+      # UPDATE_MANIFEST_URL: https://你的镜像/update/latest.json
       # 需要口令时，在下面加两行（两个都要填）：
       # AUTH_USER: admin
       # AUTH_PASS: change-me

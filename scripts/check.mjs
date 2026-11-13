@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import vm from 'node:vm';
 import zlib from 'node:zlib';
+import crypto from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
@@ -20,11 +21,13 @@ console.log('栖间 · NestLedger 项目自检\n');
 for (const f of [
   'web/index.html', 'server/index.js', 'server/package.json', 'Dockerfile',
   'docker-compose.yml', 'docker-compose.standalone.yml', 'docker-compose.build.yml',
-  'docker-compose.image.yml',
+  'docker-compose.image.yml', 'docker-compose.autoupdate.yml',
+  'VERSION', 'update/latest.json',
   '.env.example', '.gitignore', '.dockerignore', '.gitattributes',
   'README.md', 'LICENSE', 'CHANGELOG.md', '.github/workflows/release.yml',
   'scripts/check.mjs', 'scripts/smoke.mjs', 'scripts/predeploy.sh',
-  'scripts/gen-standalone.mjs', 'scripts/test-standalone.mjs', 'scripts/test-bills.mjs',
+  'scripts/gen-standalone.mjs', 'scripts/sync-version.mjs',
+  'scripts/test-standalone.mjs', 'scripts/test-bills.mjs', 'scripts/test-update.mjs',
   'scripts/backup.sh', 'scripts/restore.sh',
   'docs/飞牛NAS部署.md', 'docs/备份与恢复.md'
 ]) check('存在 ' + f, has(f));
@@ -42,7 +45,7 @@ check('具备 NAS 同步入口', html.includes('function initSync()') && html.in
 check('具备时间色阶', html.includes('DUE_AMBER_MAX'));
 check('账单期次基准函数存在', html.includes('function billStartMonth('));
 check('账单生成以本次收租时间为基准', html.includes('var baseM=billStartMonth(c);'));
-check('生成下界覆盖下一期账期', html.includes('var through=throughMonth<baseM?baseM:throughMonth;'));
+check('生成下界覆盖合同起始期', html.includes('var firstPeriod=addMonths(baseM,k*span);') && html.includes('var through=throughMonth<firstPeriod?firstPeriod:throughMonth;'));
 check('提醒与同步逻辑使用同一基准',
   html.includes('var span=cycleMonths(c), startM=billStartMonth(c);') &&
   html.includes('var startM=billStartMonth(c);\n    var endM='));
@@ -51,6 +54,12 @@ check('具备错位账单识别与清理', html.includes('function misalignedBil
 check('批量生成提供清理选项', html.includes("key:'cleanStale'") && html.includes("v.cleanStale!=='保留'"));
 check('账单页提供错位提示条', html.includes('旧版错位账单') && html.includes('var staleHTML='));
 check('单合同生成同步清理', html.includes('removeMisalignedBills(db,c.id)'));
+check('生成后清除筛选并跳到账单页', html.includes('function revealBills(') && html.includes('save(); revealBills(); render();'));
+check('单合同生成同样清除筛选', html.includes('save(); modalClose(); revealBills(); render();'));
+check('失效月份筛选自动校正', html.includes('function validMonthFilter(') && html.includes('var f=validMonthFilter(state.f.bills);'));
+check('流水页同样校正月份筛选', html.includes('var f=validMonthFilter(state.f.txns);'));
+check('筛选致空时提供一键清除', html.includes('var filterHTML=') && html.includes("case 'clear-bill-filter'"));
+check('生成提示不再谎称已全部存在', !html.includes('该期间账单已全部存在，无需重复生成') && !html.includes('账单已全部存在，无需重复生成'));
 
 execFileSync(process.execPath, ['--check', path.join(root, 'server/index.js')]);
 check('服务端脚本语法', true);
@@ -108,7 +117,7 @@ check('源码构建版不写 image 字段（避免无谓 Pulling）', !/^\s*imag
 
 // ---- GHCR 纯镜像版 ----
 const imageCompose = read('docker-compose.image.yml');
-check('纯镜像版引用 GHCR', imageCompose.includes('ghcr.io/yourname/nestledger:latest'));
+check('纯镜像版引用本仓库 GHCR', imageCompose.includes('ghcr.io/lq-wq/nestledger:latest'));
 check('纯镜像版不触发 build', !/\bbuild:/.test(imageCompose));
 check('纯镜像版挂载 ./data', imageCompose.includes('./data:/data'));
 check('纯镜像版端口一致', imageCompose.includes('"8787:8787"'));
@@ -138,5 +147,90 @@ check('CHANGELOG 含 v1.2.1 账单修复说明',
 check('README 收录账单回归测试命令', readme.includes('scripts/test-bills.mjs'));
 check('README 说明升级后清理错位账单', readme.includes('清理（推荐）'));
 check('部署文档提供 v1.2.1 升级清理步骤', doc.includes('清理旧版错位账单'));
+check('CHANGELOG 含 v1.2.2 可见性修复', read('CHANGELOG.md').includes('v1.2.2') && read('CHANGELOG.md').includes('revealBills'));
+check('README 说明生成后自动清除筛选', readme.includes('自动清除筛选'));
+check('部署文档含 v1.2.2 生成可见性排障', doc.includes('提示已生成账单'));
+
+// ---- v1.3.0 · 版本号单一真源 ----
+const VERSION = read('VERSION').trim();
+const sha = b => crypto.createHash('sha256').update(b).digest('hex');
+check('VERSION 是合法 semver', /^\d+\.\d+\.\d+/.test(VERSION));
+check('服务端 APP_VERSION 与 VERSION 一致', read('server/index.js').includes("const APP_VERSION = '" + VERSION + "';"));
+check('package.json 版本与 VERSION 一致', JSON.parse(read('server/package.json')).version === VERSION);
+check('前端 APP_VERSION 与 VERSION 一致', html.includes("var APP_VERSION='" + VERSION + "';"));
+const localHtml = path.resolve(root, '..', '房屋租赁管理系统.html');
+const localSrc = fs.existsSync(localHtml) ? fs.readFileSync(localHtml, 'utf8') : '';
+check('根目录单文件版版本号同步', !localSrc || localSrc.includes("var APP_VERSION='" + VERSION + "';"));
+check('版本同步脚本以 VERSION 为真源',
+  read('scripts/sync-version.mjs').includes('readFileSync(VERSION_FILE') &&
+  read('scripts/sync-version.mjs').includes('brotliCompressSync'));
+
+// ---- v1.3.0 · 更新清单 ----
+const manifest = JSON.parse(read('update/latest.json'));
+check('更新清单 schema 与版本', manifest.schema === 1 && manifest.version === VERSION);
+check('更新清单指向正确仓库与分支', manifest.repo === 'lq-wq/nestledger' && manifest.branch === 'main');
+check('更新清单 payload sha256 正确', sha(Buffer.from(manifest.payload, 'utf8')) === manifest.sha256);
+const payloadFiles = JSON.parse(zlib.brotliDecompressSync(Buffer.from(manifest.payload, 'base64')).toString('utf8'));
+check('更新包只含两个运行文件', Object.keys(payloadFiles).sort().join(',') === 'server/index.js,web/index.html');
+check('更新包 web 与源码逐字一致', payloadFiles['web/index.html'] === html);
+check('更新包 server 与源码逐字一致', payloadFiles['server/index.js'] === read('server/index.js'));
+for (const n of ['web/index.html', 'server/index.js']) {
+  const b = Buffer.from(payloadFiles[n], 'utf8');
+  check('更新清单校验和 ' + n, manifest.files[n].sha256 === sha(b) && manifest.files[n].bytes === b.length);
+}
+check('更新包内前端版本号一致', payloadFiles['web/index.html'].includes("var APP_VERSION='" + VERSION + "';"));
+check('更新包内服务端版本号一致', payloadFiles['server/index.js'].includes("const APP_VERSION = '" + VERSION + "';"));
+
+// ---- v1.3.0 · 网页版本入口与更新客户端 ----
+for (const [label, src] of [['web', html], ['单文件版', localSrc]]) {
+  if (!src) continue;
+  check(label + ' 含版本号常量', src.includes("var APP_VERSION='" + VERSION + "';"));
+  check(label + ' 含关于与更新入口', src.includes("setAttribute('data-act','open-about')"));
+  check(label + ' 含更新模块', src.includes('function initUpdate(') && src.includes('function aboutDialog('));
+  check(label + ' 调用更新接口', src.includes("'/api/update/status'") && src.includes("'/api/update/apply'"));
+  check(label + ' 本地模式不联网', src.includes('function updServerMode()') && src.includes("if(!updServerMode()){"));
+  check(label + ' 支持配置/回滚/重启', src.includes("'/api/update/config'") && src.includes("'/api/update/rollback'") && src.includes("'/api/update/restart'"));
+  check(label + ' 事件分支齐全', src.includes("case 'open-about':") && src.includes("case 'upd-apply':") && src.includes("case 'upd-config':"));
+  check(label + ' 启动时挂载版本按钮', src.includes('initUpdate();'));
+}
+const updSlice = s => s.slice(s.indexOf('/* ---------------- 版本与自动更新'), s.indexOf('/* ---------------- 启动'));
+check('两份 HTML 版本模块逐字一致', !localSrc || updSlice(html) === updSlice(localSrc));
+
+// ---- v1.3.0 · 服务端更新链路 ----
+const srv = read('server/index.js');
+for (const p of ['/api/version', '/api/update/status', '/api/update/check', '/api/update/apply', '/api/update/config', '/api/update/rollback', '/api/update/restart']) {
+  check('服务端路由 ' + p, srv.includes("p === '" + p + "'"));
+}
+check('服务端严格校验更新包', srv.includes('function verifyManifest(') && srv.includes('sha256 校验失败') && srv.includes('checkServerSyntax('));
+check('服务端覆盖层优先', srv.includes('function effectiveWebDir(') && srv.includes('const webDir = effectiveWebDir();'));
+check('服务端更新前生成快照', srv.includes('snapshot = await createSnapshot((await readMeta()).rev)'));
+check('服务端防重启循环', srv.includes('10 分钟内已重启 2 次'));
+check('服务端支持自定义与 CDN 更新源', srv.includes('UPDATE_MANIFEST_URL') && srv.includes('cdn.jsdelivr.net/gh/'));
+check('更新接口在认证检查之后', srv.indexOf('if (!checkAuth(req, res)) return;') < srv.indexOf("p === '/api/update/apply'"));
+
+// ---- v1.3.0 · 部署与 CI ----
+const gen = read('scripts/gen-standalone.mjs');
+check('启动器标记容器运行方式', gen.includes("process.env.NESTLEDGER_CONTAINER = '1';"));
+check('启动器应用更新覆盖层', gen.includes("path.join(OVERLAY_DIR, 'version.json')") && gen.includes('fs.copyFileSync(src, dest)'));
+check('主 compose 开启网页端自动更新', composeCode.includes('UPDATE_AUTO: 1') && composeCode.includes('UPDATE_REPO: lq-wq/nestledger'));
+check('主 compose 未关闭更新', !/^\s*UPDATE_OFF:/m.test(composeCode));
+check('镜像版由容器层更新', imageCompose.includes('UPDATE_OFF: 1'));
+check('源码构建版由源码更新', buildCompose.includes('UPDATE_OFF: 1'));
+const autoCompose = read('docker-compose.autoupdate.yml');
+check('自动更新版含 Watchtower', autoCompose.includes('containrrr/watchtower') && autoCompose.includes('WATCHTOWER_POLL_INTERVAL'));
+check('自动更新版挂载 docker.sock', autoCompose.includes('/var/run/docker.sock:/var/run/docker.sock'));
+check('自动更新版按标签过滤容器', autoCompose.includes('com.centurylinklabs.watchtower.enable'));
+check('自动更新版引用本仓库镜像', autoCompose.includes('ghcr.io/lq-wq/nestledger:latest'));
+const wf = read('.github/workflows/release.yml');
+check('Actions 名称保持 Build and Publish Image', wf.startsWith('name: Build and Publish Image'));
+check('Actions 允许发布 Release', /contents:\s*write/.test(wf));
+check('Actions 跑一致性门禁', wf.includes('node scripts/check.mjs'));
+check('Actions 发布更新清单', wf.includes('Publish update manifest') && wf.includes('update/latest.json'));
+check('Actions 上传清单产物', wf.includes('nestledger-update-manifest'));
+check('CHANGELOG 含 v1.3.0', read('CHANGELOG.md').includes('v1.3.0'));
+check('README 说明自动更新', readme.includes('自动更新') && readme.includes('关于与更新'));
+check('README 收录同步版本命令', readme.includes('scripts/sync-version.mjs'));
+check('README 收录更新回归命令', readme.includes('scripts/test-update.mjs'));
+check('部署文档说明网页端自动更新', doc.includes('网页端自动更新') && doc.includes('UPDATE_MANIFEST_URL'));
 
 console.log('\n全部通过：' + passed + ' 项检查\n');

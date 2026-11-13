@@ -44,16 +44,17 @@ ok('非注释行不含 Dockerfile 依赖', !/dockerfile/i.test(code));
 const appDir = path.join(TMP, 'app');
 const dataDir = path.join(TMP, 'data');
 const PORT = Number(process.env.STANDALONE_TEST_PORT || 8811);
+const env = {
+  ...process.env,
+  APP_BUNDLE: bm[1], APP_DIR: appDir, DATA_DIR: dataDir,
+  WEB_DIR: path.join(appDir, 'web'), PORT: String(PORT), HOST: '127.0.0.1',
+  BACKUP_KEEP: '3', BACKUP_ON_WRITE: '1', AUTH_USER: '', AUTH_PASS: '',
+  UPDATE_OFF: '1'   // 本地验证不联网检查更新
+};
 const child = spawn(process.execPath, ['-e', boot], {
-  cwd: REPO,
-  env: {
-    ...process.env,
-    APP_BUNDLE: bm[1], APP_DIR: appDir, DATA_DIR: dataDir,
-    WEB_DIR: path.join(appDir, 'web'), PORT: String(PORT), HOST: '127.0.0.1',
-    BACKUP_KEEP: '3', BACKUP_ON_WRITE: '1', AUTH_USER: '', AUTH_PASS: ''
-  },
-  stdio: ['ignore', 'pipe', 'pipe']
+  cwd: REPO, env, stdio: ['ignore', 'pipe', 'pipe']
 });
+let child2 = null;
 let log = '';
 child.stdout.on('data', d => { log += d; });
 child.stderr.on('data', d => { log += d; });
@@ -110,7 +111,52 @@ try {
   ok('快照列表可读', list.backups.length >= 1);
   ok('db.json 确实落在 DATA_DIR', fs.existsSync(path.join(dataDir, 'db.json')));
 
+  console.log('\n[4] 自动更新覆盖层在容器重启后生效');
+  child.kill('SIGTERM');
+  await new Promise(r => setTimeout(r, 350));
+  const VER = fs.readFileSync(path.join(REPO, 'VERSION'), 'utf8').trim();
+  const [va, vb, vc] = VER.split('.').map(Number);
+  const NEXT = va + '.' + vb + '.' + (vc + 1);
+  const ovDir = path.join(dataDir, 'app');
+  fs.mkdirSync(path.join(ovDir, 'web'), { recursive: true });
+  fs.mkdirSync(path.join(ovDir, 'server'), { recursive: true });
+  const ovJs = srcJs.replace("const APP_VERSION = '" + VER + "';", "const APP_VERSION = '" + NEXT + "';");
+  const ovHtml = srcHtml.replace("var APP_VERSION='" + VER + "';", "var APP_VERSION='" + NEXT + "';");
+  ok('覆盖层测试版本确实不同于内置', ovJs !== srcJs && ovHtml !== srcHtml);
+  fs.writeFileSync(path.join(ovDir, 'server/index.js'), ovJs, 'utf8');
+  fs.writeFileSync(path.join(ovDir, 'web/index.html'), ovHtml, 'utf8');
+  fs.writeFileSync(path.join(ovDir, 'version.json'), JSON.stringify({ version: NEXT, appliedAt: new Date().toISOString() }), 'utf8');
+
+  const PORT2 = PORT + 1;
+  child2 = spawn(process.execPath, ['-e', boot], {
+    cwd: REPO,
+    env: { ...env, PORT: String(PORT2), OVERLAY_DIR: ovDir },
+    stdio: ['ignore', 'pipe', 'pipe']
+  });
+  let log2 = '';
+  child2.stdout.on('data', d => { log2 += d; });
+  child2.stderr.on('data', d => { log2 += d; });
+  let ready = false;
+  for (let i = 0; i < 80; i++) {
+    if (child2.exitCode !== null) throw new Error('覆盖层模式启动失败：\n' + log2);
+    try { if ((await fetch('http://127.0.0.1:' + PORT2 + '/api/health')).ok) { ready = true; break; } } catch (e) {}
+    await new Promise(r => setTimeout(r, 100));
+  }
+  ok('覆盖层模式服务成功启动', ready);
+  ok('启动器日志含覆盖层提示', log2.includes('已应用自动更新覆盖层 v' + NEXT));
+  ok('启动器把新版服务端复制进 /app', fs.readFileSync(path.join(appDir, 'server/index.js'), 'utf8') === ovJs);
+  ok('启动器把新版前端复制进 /app', fs.readFileSync(path.join(appDir, 'web/index.html'), 'utf8') === ovHtml);
+  const v2 = await (await fetch('http://127.0.0.1:' + PORT2 + '/api/version')).json();
+  ok('/api/version 显示覆盖层版本', v2.version === NEXT && v2.overlay === NEXT);
+  ok('/api/version 仍显示真实内置版本', v2.builtin === VER);
+  const home2 = await (await fetch('http://127.0.0.1:' + PORT2 + '/')).text();
+  ok('重启后首页是新版前端', home2 === ovHtml);
+  const db2 = await (await fetch('http://127.0.0.1:' + PORT2 + '/api/db')).json();
+  ok('重启后业务数据不丢', db2.hasData && db2.db.properties[0].name === '自包含版测试房源');
+  child2.kill('SIGTERM');
+
   console.log('\n全部通过：' + pass + ' 项\n');
 } finally {
   child.kill('SIGTERM');
+  if (child2) child2.kill('SIGTERM');
 }
