@@ -10,7 +10,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write      # 发布「更新清单」Release asset 需要
   packages: write
 
 concurrency:
@@ -29,6 +29,8 @@ jobs:
         with:
           node-version: '22'
 
+      # check.mjs 会校验 VERSION / 四处版本号 / update/latest.json 与源码逐字一致，
+      # 以及内联 Compose 与源码一致；任一处忘记同步，这里直接失败，不会发布半成品。
       - name: Self check
         run: node scripts/check.mjs
 
@@ -74,3 +76,31 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      # 网页端自动更新的清单文件。服务端默认从仓库 main 分支读它，
+      # 这里额外发布一份到固定 Release，作为「CI 全部通过」的标记，
+      # 也可供 NAS 通过 UPDATE_MANIFEST_URL 指向该地址实现「仅 CI 成功后更新」。
+      - name: Publish update manifest
+        if: github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          version="$(tr -d '\r\n' < VERSION)"
+          echo "发布更新清单 v${version}"
+          if gh release view latest --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload latest update/latest.json --clobber --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create latest \
+              --title "NestLedger 自动更新清单" \
+              --notes "由 Build and Publish Image 自动发布，供 NAS 网页端自动更新使用。" \
+              update/latest.json --repo "$GITHUB_REPOSITORY"
+          fi
+          echo "✅ 更新清单已发布：v${version}"
+
+      - name: Upload update manifest artifact
+        if: github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@v4
+        with:
+          name: nestledger-update-manifest
+          path: update/latest.json
+          retention-days: 30
