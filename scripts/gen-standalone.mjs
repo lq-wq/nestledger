@@ -1,11 +1,12 @@
-/* 栖间 · NestLedger —— 生成「零文件依赖」的自包含 Compose
+/* 栖间 · NestLedger —— 生成「零文件依赖」的自包含 Compose（默认主文件）
  *
  * 用途：飞牛 NAS 图形界面只让「粘贴 YAML」、项目目录里没有任何源码文件时使用。
  *       把 server/index.js 与 web/index.html 压成一行 Brotli+base64，
  *       容器启动后由 Node 自己解包到 /app，因此不需要 build、Dockerfile 或本地文件。
  *
  * 运行：node scripts/gen-standalone.mjs
- * 产物：docker-compose.standalone.yml（约 60 KB，整份复制粘贴到飞牛 Compose 即可）
+ * 产物：docker-compose.yml（默认主文件，docker compose up -d 直接用）
+ *       docker-compose.standalone.yml（完全相同的兼容副本，供旧文档 / 旧链接使用）
  *
  * ⚠️ 每次修改 web/index.html 或 server/index.js 后，必须重跑本脚本，
  *    否则线上容器用的还是旧代码。scripts/check.mjs 会做一致性校验。
@@ -44,9 +45,11 @@ require(path.join(APP_DIR, 'server/index.js'));`;
 
 const indent = (text, n) => text.split('\n').map(l => ' '.repeat(n) + l).join('\n');
 
-const yaml = `# 栖间 · NestLedger —— 自包含版（飞牛 NAS 图形界面「粘贴 YAML」专用 · 零文件依赖）
+// 注释里不写具体文件名：同一份内容会同时作为主文件与兼容副本交付。
+const yaml = `# 栖间 · NestLedger —— 自包含版（默认主文件 · 飞牛 NAS 粘贴即用 · 零文件依赖）
 #
-# ✅ 把本文件【全部内容】复制进 飞牛 Docker → Compose → 新增项目 → 粘贴 YAML，直接启动。
+# ✅ 把本文件【全部内容】复制进 飞牛 Docker → Compose → 新增项目 → 粘贴 YAML，
+#    直接启动；有完整项目目录时也可直接 docker compose up -d。
 #    不需要 Dockerfile、server/、web/，也不需要 GitHub / GHCR。
 #    本文件刻意不含 build 段，所以绝不会出现
 #    「failed to read dockerfile: open Dockerfile: no such file or directory」。
@@ -59,13 +62,16 @@ const yaml = `# 栖间 · NestLedger —— 自包含版（飞牛 NAS 图形界�
 #    在「飞牛 Docker → 设置 → 镜像加速」配置加速器，或把下面 image 一行
 #    改成你 NAS 能拉到的 node:22-alpine 完整地址（例如加速地址/library/node:22-alpine）。
 #
+# ⚠️ 端口 / 口令 / 备份份数直接改下面的 ports 与 environment，本文件不读 .env。
+#
 # ⚠️ 更新应用：改完 web/index.html 或 server/index.js 后，在本机执行
 #    node scripts/gen-standalone.mjs
 #    重新生成整个 YAML，再把新内容整体替换进飞牛 Compose 项目并重启。
 #    scripts/check.mjs 会检查内联包与源码是否一致。
 #
-# 想长期更省心（git pull / 换镜像即更新），请改用 docker-compose.yml（选路径）
-# 或 docker-compose.image.yml（GHCR 纯镜像）。详见 docs/飞牛NAS部署.md。
+# 想长期更省心（git pull / 换镜像即更新），可改用 docker-compose.build.yml
+# （源码构建，需完整项目目录）或 docker-compose.image.yml（GHCR 纯镜像）。
+# 详见 docs/飞牛NAS部署.md。
 services:
   nestledger:
     image: node:22-alpine
@@ -106,14 +112,18 @@ ${indent(BOOT, 8)}
         max-file: "3"
 `;
 
-const out = path.join(root, 'docker-compose.standalone.yml');
-fs.writeFileSync(out, yaml, 'utf8');
 const roundtrip = JSON.parse(zlib.brotliDecompressSync(Buffer.from(bundle, 'base64')).toString('utf8'));
 if (roundtrip['server/index.js'] !== files['server/index.js'] ||
     roundtrip['web/index.html'] !== files['web/index.html']) {
   throw new Error('内联包回读校验失败');
 }
-console.log('已生成 docker-compose.standalone.yml');
+
+const targets = ['docker-compose.yml', 'docker-compose.standalone.yml'];
+for (const name of targets) {
+  fs.writeFileSync(path.join(root, name), yaml, 'utf8');
+}
+console.log('已生成（两份内容完全相同）：');
+for (const name of targets) console.log('  ' + name);
 console.log('  内联文件 : ' + Object.keys(files).join(', '));
 console.log('  APP_BUNDLE: ' + bundle.length + ' 字符 (' + (bundle.length / 1024).toFixed(1) + ' KB)');
 console.log('  YAML 大小: ' + (Buffer.byteLength(yaml) / 1024).toFixed(1) + ' KB');

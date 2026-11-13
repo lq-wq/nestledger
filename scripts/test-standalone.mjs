@@ -2,8 +2,10 @@
  *
  * 运行：node scripts/test-standalone.mjs
  *
- * 从【交付的】docker-compose.standalone.yml 里提取 APP_BUNDLE 与 command 启动器，
+ * 默认从【交付的】主文件 docker-compose.yml 里提取 APP_BUNDLE 与 command 启动器
+ * （可用 STANDALONE_TEST_FILE=docker-compose.standalone.yml 切换到兼容副本），
  * 用真实 Node 进程解包并起服务，验证：
+ *   - 默认主文件与兼容副本逐字一致
  *   - 解包出的 server/index.js、web/index.html 与源码逐字一致
  *   - 首页 / favicon / 健康检查 / 数据读写 / 快照可用
  * 只使用系统临时目录，不碰真实 data/。改完前端或服务端后建议跑一次。
@@ -19,11 +21,16 @@ const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'nestledger-st-'));
 process.on('exit', () => { try { fs.rmSync(TMP, { recursive: true, force: true }); } catch {} });
 
-const yaml = fs.readFileSync(path.join(REPO, 'docker-compose.standalone.yml'), 'utf8');
+const target = process.env.STANDALONE_TEST_FILE || 'docker-compose.yml';
+const yaml = fs.readFileSync(path.join(REPO, target), 'utf8');
 let pass = 0;
 const ok = (name, cond) => { assert.ok(cond, name); pass++; console.log('  ✓ ' + name); };
 
 // 验证的是交付物本身，不读生成脚本里的变量
+ok('验证目标为 ' + target, !!target);
+ok('默认主文件与兼容副本逐字一致',
+  fs.readFileSync(path.join(REPO, 'docker-compose.yml'), 'utf8') ===
+  fs.readFileSync(path.join(REPO, 'docker-compose.standalone.yml'), 'utf8'));
 const bm = yaml.match(/      APP_BUNDLE: "([A-Za-z0-9+/=]+)"/);
 ok('YAML 中能提取 APP_BUNDLE', !!bm);
 const bootMatch = yaml.match(/      - \|\r?\n((?:        [^\r\n]*\r?\n)+)/);
