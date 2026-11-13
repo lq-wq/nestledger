@@ -73,7 +73,7 @@ if [ "$MODE" = standalone ] || [ "$MODE" = image ]; then
       echo "✗ APP_BUNDLE 这一行看起来不完整（$BUNDLE_LEN 字符，预期 > 50000）"
       echo "════════════════════════════════════════════════════════"
       echo "多半是复制粘贴时被截断了。请从 docker-compose.yml 全选复制整份内容"
-      echo "（约 75 KB），重新粘贴进飞牛 Compose 项目。"
+      echo "（约 76 KB），重新粘贴进飞牛 Compose 项目。"
       echo ""
       exit 1
     fi

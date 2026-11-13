@@ -61,6 +61,17 @@ check('流水页同样校正月份筛选', html.includes('var f=validMonthFilter
 check('筛选致空时提供一键清除', html.includes('var filterHTML=') && html.includes("case 'clear-bill-filter'"));
 check('生成提示不再谎称已全部存在', !html.includes('该期间账单已全部存在，无需重复生成') && !html.includes('账单已全部存在，无需重复生成'));
 
+// ---- v1.3.1 · 概览「本月」统计口径 ----
+check('概览本月口径为独立纯函数', html.includes('function monthBillStats(d,cm){') && html.includes('function monthTxnStats(d,cm){'));
+check('账单按本期收租时间归月', html.includes('return dm ? dm===cm : (b.period<=cm && b.periodEnd>=cm);'));
+check('旧账单缺收租时间时回退账期覆盖', html.includes('var dm=String(b.dueDate||\'\').slice(0,7);') && html.includes('b.period<=cm && b.periodEnd>=cm'));
+check('流水按日期归月', html.includes('return String(t.date||\'\').slice(0,7)===cm;'));
+check('概览接入本月口径', html.includes('var ms=monthBillStats(db,cm), ts=monthTxnStats(db,cm);') && html.includes('var thisBills=ms.bills, due=ms.due, got=ms.got;'));
+check('概览卡片说明按本月收租时间', html.includes('按本月收租时间'));
+check('概览展示本月收支条', html.includes('+monthStrip+rulerHTML+') && html.includes('本月收支 · ') && html.includes('本月应收账单 '));
+check('空数据不显示多余小计条', html.includes('var monthStrip=(ts.count||ms.count)?'));
+check('不再用账期覆盖当月统计待收', !html.includes('账期覆盖当月的账单（含季付'));
+
 execFileSync(process.execPath, ['--check', path.join(root, 'server/index.js')]);
 check('服务端脚本语法', true);
 const pkg = JSON.parse(read('server/package.json'));
@@ -195,6 +206,17 @@ for (const [label, src] of [['web', html], ['单文件版', localSrc]]) {
 }
 const updSlice = s => s.slice(s.indexOf('/* ---------------- 版本与自动更新'), s.indexOf('/* ---------------- 启动'));
 check('两份 HTML 版本模块逐字一致', !localSrc || updSlice(html) === updSlice(localSrc));
+// 两份 HTML 的示例数据提示文案本来就有差异（NAS 版用 storagePhrase()），
+// 因此只比对「本月」口径的纯函数与接入片段，不做整段逐字比较。
+const dashCore = s => s.slice(s.indexOf('/* 「本月」统计口径'), s.indexOf('function rentRulerHTML('));
+check('两份 HTML 本月口径函数逐字一致', !localSrc || dashCore(html) === dashCore(localSrc));
+for (const frag of [
+  'var ms=monthBillStats(db,cm), ts=monthTxnStats(db,cm);',
+  'var thisBills=ms.bills, due=ms.due, got=ms.got;',
+  'var monthStrip=(ts.count||ms.count)?',
+  '+monthStrip+rulerHTML+',
+  '按本月收租时间'
+]) check('单文件版同步概览口径 ' + frag.slice(0, 26), !localSrc || localSrc.includes(frag));
 
 // ---- v1.3.0 · 服务端更新链路 ----
 const srv = read('server/index.js');
@@ -232,5 +254,11 @@ check('README 说明自动更新', readme.includes('自动更新') && readme.inc
 check('README 收录同步版本命令', readme.includes('scripts/sync-version.mjs'));
 check('README 收录更新回归命令', readme.includes('scripts/test-update.mjs'));
 check('部署文档说明网页端自动更新', doc.includes('网页端自动更新') && doc.includes('UPDATE_MANIFEST_URL'));
+
+// ---- v1.3.1 · 概览本月口径文档 ----
+check('CHANGELOG 含 v1.3.1 概览口径修复', read('CHANGELOG.md').includes('v1.3.1') && read('CHANGELOG.md').includes('monthBillStats'));
+check('README 说明概览本月口径', readme.includes('概览本月口径') && readme.includes('本月收支'));
+check('README 账单回归项数已同步', readme.includes('（111 项）') && !readme.includes('（83 项）'));
+check('部署文档含概览待收排障', doc.includes('概览「本月待收」是 ¥0') && doc.includes('本期收租时间'));
 
 console.log('\n全部通过：' + passed + ' 项检查\n');

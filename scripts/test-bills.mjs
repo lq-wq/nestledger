@@ -7,6 +7,7 @@
  *   - 新签合同兼容、四种付款方式、月末 / 跨年、已收讫、到期限制
  *   - 收款顺延、改合同后同步、旧版错位账单清理与重建、示例数据
  *   - v1.2.2：删空账单后重新生成、起始期下界、筛选校正与生成后可见性
+ *   - v1.3.1：概览「本月待收」按本期收租时间归月、本月收支流水归月、季付不重复计
  * 只使用临时 vm 环境，不读写真实数据。
  */
 import fs from 'node:fs';
@@ -188,7 +189,56 @@ eq('生成后月份筛选清空', run('state.f.bills.month'), 'all');
 eq('生成后关键词清空', run('state.f.bills.q'), '');
 eq('生成后勾选清空', run('state.sel.bill.length'), 0);
 
-// ---- 10. 静态口径 ----
+// ---- 10. 概览「本月」统计口径（v1.3.1） ----
+// 用户截图：11-24 收租、账期 2026-12~2027-02，旧口径按「账期覆盖当月」统计 → 概览本月待收恒为 ¥0
+const mk = (o = {}) => ({ id: 'b1', contractId: 'c1', roomId: 'r1', tenantId: 't1',
+  period: '2026-12', periodEnd: '2027-02', amount: 4800, dueDate: '2026-11-24',
+  paidAmount: 0, paidDate: '', status: '未收', note: '', ...o });
+const txn = (o = {}) => ({ id: 'x1', type: '收入', category: '租金', amount: 4800,
+  date: '2026-11-24', roomId: 'r1', tenantId: 't1', ref: '', note: '', ...o });
+const statDB = (bills, txns) => { const d = emptyDB(contract()); d.bills = bills; d.txns = txns || []; return d; };
+const MS = m => 'monthBillStats(db,"2026-11").' + m;
+const TS = m => 'monthTxnStats(db,"2026-11").' + m;
+
+setDB(statDB([mk()]));
+eq('截图场景：账单计入收租月 11 月', run(MS('count')), 1);
+eq('截图场景：本月应收 4800', run(MS('due')), 4800);
+eq('截图场景：本月已收 0', run(MS('got')), 0);
+eq('截图场景：本月待收 4800', run('monthBillStats(db,"2026-11").due-monthBillStats(db,"2026-11").got'), 4800);
+eq('截图场景：账期所在的 12 月不重复计', run('monthBillStats(db,"2026-12").count'), 0);
+
+setDB(statDB([mk({ paidAmount: 4800, status: '已收' })], [txn()]));
+eq('已收款：本月应收 4800', run(MS('due')), 4800);
+eq('已收款：本月已收 4800', run(MS('got')), 4800);
+eq('已收款：待收 0', run('monthBillStats(db,"2026-11").due-monthBillStats(db,"2026-11").got'), 0);
+eq('已收款：本月流水收入 4800', run(TS('income')), 4800);
+
+setDB(statDB([], [txn()]));
+eq('仅一笔 11 月收入流水：无账单', run(MS('count')), 0);
+eq('仅一笔 11 月收入流水：收入仍可见', run(TS('income')), 4800);
+eq('仅一笔 11 月收入流水：净额 4800', run('monthTxnStats(db,"2026-11").income-monthTxnStats(db,"2026-11").expense'), 4800);
+
+setDB(statDB([mk({ period: '2026-11', periodEnd: '2027-01', dueDate: '2026-12-24' })]));
+eq('账期覆盖当月但收租在下月：不计入 11 月', run(MS('count')), 0);
+eq('账期覆盖当月但收租在下月：计入 12 月', run('monthBillStats(db,"2026-12").count'), 1);
+
+setDB(statDB([mk(), mk({ id: 'b2', period: '2027-03', periodEnd: '2027-05', dueDate: '2027-02-24' }),
+  mk({ id: 'b3', period: '2026-09', periodEnd: '2026-11', dueDate: '2026-08-24' })]));
+eq('多期季付账单本月只统计 1 笔', run(MS('count')), 1);
+eq('多期季付账单本月应收仍是 4800', run(MS('due')), 4800);
+
+setDB(statDB([mk({ dueDate: '', period: '2026-11', periodEnd: '2027-01' })]));
+eq('缺收租时间的旧账单回退账期覆盖', run(MS('count')), 1);
+
+setDB(statDB([mk({ paidAmount: 2000 })],
+  [txn({ amount: 2000 }), txn({ id: 'y1', type: '支出', category: '维修', amount: 380, date: '2026-11-05' })]));
+eq('部分收款：待收 2800', run('monthBillStats(db,"2026-11").due-monthBillStats(db,"2026-11").got'), 2800);
+eq('部分收款：流水收入 2000', run(TS('income')), 2000);
+eq('部分收款：流水支出 380', run(TS('expense')), 380);
+eq('部分收款：流水净额 1620', run('monthTxnStats(db,"2026-11").income-monthTxnStats(db,"2026-11").expense'), 1620);
+eq('上月流水不计入本月', run('monthTxnStats(db,"2026-10").count'), 0);
+
+// ---- 11. 静态口径 ----
 const html = fs.readFileSync(path.join(ROOT, FILE), 'utf8');
 ok('具备期次基准函数', html.includes('function billStartMonth('));
 ok('具备错位清理函数', html.includes('function removeMisalignedBills('));
@@ -201,6 +251,12 @@ ok('账单页使用月份校正', html.includes('var f=validMonthFilter(state.f.
 ok('生成后清除筛选', html.includes('save(); revealBills(); render();'));
 ok('筛选致空提供一键清除', html.includes('var filterHTML=') && html.includes("case 'clear-bill-filter'"));
 ok('提示不再谎称账单已全部存在', !html.includes('该期间账单已全部存在，无需重复生成'));
+ok('概览本月口径为纯函数', html.includes('function monthBillStats(d,cm){') && html.includes('function monthTxnStats(d,cm){'));
+ok('账单按收租时间归月', html.includes('return dm ? dm===cm : (b.period<=cm && b.periodEnd>=cm);'));
+ok('概览接入本月口径', html.includes('var ms=monthBillStats(db,cm), ts=monthTxnStats(db,cm);'));
+ok('概览卡片说明按本月收租时间', html.includes('按本月收租时间'));
+ok('概览展示本月收支条', html.includes('+monthStrip+rulerHTML+') && html.includes('本月收支 · '));
+ok('不再用账期覆盖当月统计待收', !html.includes('账期覆盖当月的账单（含季付'));
 
 console.log('\n全部通过：' + pass + ' 项\n');
 process.exit(fail ? 1 : 0);

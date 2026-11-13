@@ -526,7 +526,7 @@ tbody tr.is-picked>td{background:var(--accent-soft)}
 var APP_NAME = '栖间';
 var APP_NAME_EN = 'NestLedger';
 var STORE_KEY = 'rental_manager_db_v1';
-var APP_VERSION='1.3.0';  /* 由 scripts/sync-version.mjs 维护 */
+var APP_VERSION='1.3.1';  /* 由 scripts/sync-version.mjs 维护 */
 /* 界面主题偏好单独存放：不进入业务数据 db，也不写入 JSON 备份 */
 var THEME_KEY = 'rental_manager_theme_v1';
 var currentTheme = 'light';
@@ -1402,6 +1402,26 @@ function monthOptions(){
 function matchQ(q,parts){ if(!q) return true; q=q.toLowerCase(); return parts.some(function(x){ return String(x==null?'':x).toLowerCase().indexOf(q)>=0; }); }
 
 /* ---------- 概览 ---------- */
+/* 「本月」统计口径（v1.3.1）：
+   账单按【本期收租时间】所在月归月。v1.2.1 起账期从收租日次月起算，
+   再用「账期覆盖当月」会把真正该收的月份整笔漏掉；季付 / 半年付账单也会在
+   账期覆盖的每个月重复计一次全额。仅当历史账单缺收租时间时才回退为账期覆盖当月。
+   收支流水按【流水日期】所在月统计，收款登记会自动生成收入流水。 */
+function monthBillStats(d,cm){
+  var list=(d.bills||[]).filter(function(b){
+    var dm=String(b.dueDate||'').slice(0,7);
+    return dm ? dm===cm : (b.period<=cm && b.periodEnd>=cm);
+  });
+  return {bills:list,
+    due:sum(list,function(b){return num(b.amount);}),
+    got:sum(list,function(b){return num(b.paidAmount);}),count:list.length};
+}
+function monthTxnStats(d,cm){
+  var list=(d.txns||[]).filter(function(t){return String(t.date||'').slice(0,7)===cm;});
+  return {income:sum(list,function(t){return t.type==='收入'?num(t.amount):0;}),
+    expense:sum(list,function(t){return t.type==='支出'?num(t.amount):0;}),count:list.length};
+}
+
 /* 收租时间尺：只读渲染未来两周（-6 ~ +7 天）的收租节点，不写入任何业务数据 */
 function rentRulerHTML(st){
   var base=new Date(today()+'T00:00:00');
@@ -1475,10 +1495,8 @@ function viewDashboard(){
   var rented=db.rooms.filter(function(r){return r.status==='已租';});
   var rate=usable.length?Math.round(rented.length/usable.length*100):0;
   var cm=curMonth();
-  // 本月应承担的账单：账期覆盖当月的账单（含季付、半年付跨月账单）
-  var thisBills=db.bills.filter(function(b){return b.period<=cm && b.periodEnd>=cm;});
-  var due=sum(thisBills,function(b){return b.amount;});
-  var got=sum(thisBills,function(b){return b.paidAmount;});
+  var ms=monthBillStats(db,cm), ts=monthTxnStats(db,cm);
+  var thisBills=ms.bills, due=ms.due, got=ms.got;
   var unpaidBills=db.bills.filter(function(b){return billStatus(b)!=='已收';});
   var overdue=unpaidBills.filter(function(b){return billStatus(b)==='逾期';});
   var expiring=db.contracts.filter(function(c){
@@ -1517,7 +1535,17 @@ function viewDashboard(){
     stat('房源 / 房间',db.properties.length+' <small>处</small> / '+db.rooms.length+' <small>间</small>','停用 '+db.rooms.filter(function(r){return r.status==='停用';}).length+' 间','building','')+
     stat('在租房间',rented.length+' <small>间</small>','空置 '+usable.filter(function(r){return r.status==='空置';}).length+' 间','building','ok')+
     stat('出租率',rate+'<small>%</small>',usable.length+' 间可出租房','dashboard','')+
-    stat('本月待收',money(due-got),'应收 '+money(due)+' / 已收 '+money(got)+' · 近 '+lead+' 天需关注 '+rst.attention.length+' 笔','wallet',(due-got>0?'warn':'ok'));
+    stat('本月待收',money(due-got),'应收 '+money(due)+' / 已收 '+money(got)+' · 按本月收租时间 · 近 '+lead+' 天需关注 '+rst.attention.length+' 笔','wallet',(due-got>0?'warn':'ok'));
+
+
+  var monthStrip=(ts.count||ms.count)?
+    ('<div class="sum-strip section" style="border:1px solid var(--border);border-radius:var(--radius);gap:18px">'+
+      '<span class="sub-txt">本月收支 · '+esc(cm)+'</span>'+
+      '<span class="ok-txt">收入 <b style="color:var(--ok)">'+money(ts.income)+'</b></span>'+
+      '<span class="danger-txt">支出 <b style="color:var(--danger)">'+money(ts.expense)+'</b></span>'+
+      '<span>净额 <b>'+money(ts.income-ts.expense)+'</b></span>'+
+      '<span class="sub-txt">按财务流水日期统计；本月应收账单 '+ms.count+' 笔（收款登记自动生成收入流水）</span>'+
+    '</div>') : '';
 
   var quickCard='<div class="card section"><div class="card-head"><h2>快捷操作</h2></div><div class="card-body quick">'+
     '<button class="btn" data-act="add-room">'+svg('plus')+'新增房间</button>'+
@@ -1560,7 +1588,7 @@ function viewDashboard(){
       attRows,'近 '+lead+' 天没有需要跟进的收租事项。')+'</div>';
 
   document.getElementById('view').innerHTML=demoNotice+remindBanner+leadHTML+
-    '<div class="metric-strip section">'+cards+'</div>'+rulerHTML+
+    '<div class="metric-strip section">'+cards+'</div>'+monthStrip+rulerHTML+
     quickCard+(settings().reminderEnabled?remindCard:'')+unpaidCard+expCard;
 }
 function stat(label,value,foot,icon,tone){

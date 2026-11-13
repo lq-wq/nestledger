@@ -32,7 +32,7 @@ const BACKUP_KEEP = Math.max(1, Number(process.env.BACKUP_KEEP || 30));
 const BACKUP_ON_WRITE = process.env.BACKUP_ON_WRITE !== '0';
 const AUTH_USER = process.env.AUTH_USER || '';
 const AUTH_PASS = process.env.AUTH_PASS || '';
-const APP_VERSION = '1.3.0';
+const APP_VERSION = '1.3.1';
 // 容器启动器会写入内置包的真实版本；有覆盖层时它仍指内置版，避免与 APP_VERSION 混淆
 const BUILTIN_VERSION = process.env.NESTLEDGER_BUILTIN || APP_VERSION;
 
