@@ -1,0 +1,46 @@
+# 栖间 · NestLedger —— 源码构建版（进阶用 · 需要完整项目目录）
+#
+# ⚠️ 本文件含 build 段，必须与下面这些文件放在【同一个目录】：
+#      Dockerfile  server/index.js  server/package.json  web/index.html
+#   否则必然报 failed to read dockerfile: open Dockerfile: no such file or directory。
+#   不确定就先跑： bash scripts/predeploy.sh . docker-compose.build.yml
+#
+# 飞牛 NAS 图形界面用「粘贴 YAML」创建的项目里没有任何源码文件，
+# 不要使用本文件 —— 默认主文件 docker-compose.yml 已是零文件依赖的自包含版。
+#
+# 用法（在项目根目录，或 git clone 下来的完整仓库里）：
+#   bash scripts/predeploy.sh . docker-compose.build.yml   # 先自检目录结构
+#   docker compose -f docker-compose.build.yml up -d --build
+#   docker compose -f docker-compose.build.yml up -d
+#
+# 本文件刻意不写 image: 字段，避免 Compose 先去 Docker Hub 拉取不存在的
+# 本地标签（表现为 nestledger Pulling + registry-1.docker.io 超时）。
+services:
+  nestledger:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        # 国内 NAS 拉不到 Docker Hub 时，在 .env 里把 BASE_IMAGE 换成可用地址
+        BASE_IMAGE: ${BASE_IMAGE:-node:22-alpine}
+    container_name: nestledger
+    restart: unless-stopped
+    stop_grace_period: 10s
+    ports:
+      - "${PORT:-8787}:8787"
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+      DATA_DIR: /data
+      BACKUP_KEEP: ${BACKUP_KEEP:-30}
+      BACKUP_ON_WRITE: ${BACKUP_ON_WRITE:-1}
+      MAX_BODY: ${MAX_BODY:-67108864}
+      AUTH_USER: ${AUTH_USER:-}
+      AUTH_PASS: ${AUTH_PASS:-}
+    volumes:
+      # 所有业务数据、附件与自动快照都在这个目录，备份 / 迁移只需复制它
+      - ./data:/data
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "3"
