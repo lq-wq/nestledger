@@ -923,6 +923,22 @@ function rentDateAt(c,k){ return addRentMonths(rentDateOf(c), k*cycleMonths(c));
 /* 「本次收租时间」那笔租金已收讫时，第 0 期不再生成待收账单，系统从下一期（k=1）开始。
    旧合同没有该字段，一律按「待收」处理，保持原有账单与提醒不变。 */
 function firstBillIndex(c){ return (c && c.rentSettled==='已收讫') ? 1 : 0; }
+/* 「本次收租时间」对应的首期账期起始月。
+   账期与收租时间必须共用同一套期次编号，否则「本次收租时间」是很多期之后的
+   当前应收日时，收租时间会被整体平移（例：账期 2026-09 配 2029-02 的收租日）。
+   - 新签合同：收租日落在起租月所在周期内，首期账期 = 起租月，保持原有习惯。
+   - 存量合同：本次收租时间已跨过至少一期，收的是紧接着的下一个付款周期，
+     账期直接从收租日次月开始，不再按起租月网格推算，避免年付 / 半年付把账期推偏。 */
+function billStartMonth(c){
+  var span=cycleMonths(c);
+  var startM=String((c&&c.startDate)||'').slice(0,7);
+  var rentM=rentDateOf(c).slice(0,7);
+  if(!/^\d{4}-\d{2}$/.test(startM)) return /^\d{4}-\d{2}$/.test(rentM)?rentM:'';
+  if(!/^\d{4}-\d{2}$/.test(rentM)) return startM;
+  var diff=monthIndex(rentM)-monthIndex(startM);
+  if(diff<span) return startM;                       // 起租当期收租：沿用起租月
+  return addMonths(rentM,1);                         // 本次收租对应紧接着的下一个周期
+}
 /* 下一期交租时间 = 本次收租时间 + 一个付款周期（月付1/季付3/半年付6/年付12 个月） */
 function nextRentDateFrom(dateStr,c){ return addRentMonths(dateStr, cycleMonths(c)); }
 /* 某期账单之后的下一次交租时间。
@@ -930,7 +946,7 @@ function nextRentDateFrom(dateStr,c){ return addRentMonths(dateStr, cycleMonths(
    若账单收租时间被人工改过，则尊重改动，以该日期为准顺延一期。 */
 function nextDueAfterBill(c,b){
   if(!c || !b) return '';
-  var span=cycleMonths(c), startM=String(c.startDate||rentDateOf(c)).slice(0,7);
+  var span=cycleMonths(c), startM=billStartMonth(c);
   var period=String(b.period||'');
   if(!/^\d{4}-\d{2}$/.test(startM) || !/^\d{4}-\d{2}$/.test(period)) return nextRentDateFrom(b.dueDate,c);
   var diff=monthIndex(period)-monthIndex(startM), k=diff/span;
@@ -954,7 +970,7 @@ function nextRentInfo(c){
   }else{
     var last=null;
     bills.forEach(function(x){ if(!last || x.period>last.period) last=x; });
-    var startM=String(c.startDate||rentDateOf(c)).slice(0,7);
+    var startM=billStartMonth(c);
     var endM=String(c.endDate||'').slice(0,7);
     var first=firstBillIndex(c), nextK=first;
     if(last){
@@ -1056,18 +1072,43 @@ function normalize(){
   });
   refreshBillStatuses();
 }
+/* v1.2.1：识别旧版「账期与收租时间错位」的自动账单。
+   旧版把「本次收租时间」当第 0 期，账期却从起租月起算，会出现
+   账期 2026-09 却配 2029-02 的收租日。只标记未结清、未登记收款、无备注，
+   且收租月份比账期结束月晚一个付款周期以上的账单；
+   已收 / 部分收款 / 手工编辑过备注的账单一律保留。 */
+function misalignedBillIds(d, onlyContractId){
+  var ids={};
+  (d.bills||[]).forEach(function(b){
+    if(onlyContractId && b.contractId!==onlyContractId) return;
+    var c=byId(d.contracts||[],b.contractId);
+    if(!c) return;
+    if(billStatus(b)==='已收' || num(b.paidAmount)>0 || (b.note&&String(b.note).trim())) return;
+    if(!/^\d{4}-\d{2}$/.test(String(b.periodEnd||'')) || !isDateStr(b.dueDate)) return;
+    if(monthIndex(b.dueDate.slice(0,7))-monthIndex(b.periodEnd)>cycleMonths(c)) ids[b.id]=1;
+  });
+  return ids;
+}
+function removeMisalignedBills(d, onlyContractId){
+  var ids=misalignedBillIds(d,onlyContractId);
+  var before=d.bills.length;
+  d.bills=d.bills.filter(function(b){ return !ids[b.id]; });
+  return before-d.bills.length;
+}
 function makeBillsFor(d, throughMonth){
   var created=0;
   d.contracts.forEach(function(c){
     if(c.status!=='生效中' && c.status!=='已到期') return;
     var span=cycleMonths(c), k=firstBillIndex(c);
-    var startM=String(c.startDate||rentDateOf(c)).slice(0,7);
+    var baseM=billStartMonth(c);           // 账期与收租时间共用的期次基准
     var endM=String(c.endDate||'').slice(0,7);
-    if(!/^\d{4}-\d{2}$/.test(startM)) return;
+    if(!/^\d{4}-\d{2}$/.test(baseM)) return;
+    // 本次收租时间收的是下一期，即使「生成至账期」选在当月也要至少生成这一期
+    var through=throughMonth<baseM?baseM:throughMonth;
     while(k<240){
-      var period=addMonths(startM,k*span);   // 期首月：起租月按付款方式逐期推进
-      if(period>throughMonth || (endM && period>endM)) break;
-      var due=rentDateAt(c,k);               // 该期收租时间：本次收租时间按付款方式顺延
+      var period=addMonths(baseM,k*span);  // 期首月：从本次收租时间对应期开始推进
+      if(period>through || (endM && period>endM)) break;
+      var due=rentDateAt(c,k);             // 第 k 期收租时间 = 本次收租时间 + k×周期
       var exists=false;
       for(var i=0;i<d.bills.length;i++){ if(d.bills[i].contractId===c.id && d.bills[i].period===period){ exists=true; break; } }
       if(!exists){
@@ -1894,7 +1935,7 @@ function contractFormFields(c){
     {key:'payCycle',label:'付款方式',type:'select',options:['月付','季付','半年付','年付'],required:true,
       tip:'与「本次收租时间」共同决定每期收租日：季付 = 每 3 个月的同一天'},
     {key:'rentDate',label:'本次收租时间',type:'date',required:true,
-      tip:'本期收租日期（通常等于起租日，可改）；后续每期以此日期按付款方式顺延'},
+      tip:'本次 / 下一次应收租金的日期；账期与每期收租时间都以它为准（新签合同首期账期取起租月），后续按付款方式顺延'},
     {key:'rentSettled',label:'本次租金',type:'select',options:['已收讫','待收'],required:true,
       def:(c?(c.rentSettled||'待收'):'已收讫'),
       tip:'已收讫＝本次这笔已收妥，下次交租时间＝本次＋付款周期，账单从下一期开始生成；待收＝本次也作为一期待收账单'},
@@ -2009,7 +2050,7 @@ function contractDetail(id){
     ['起租日期',esc(fmtDate(c.startDate))],['到期日期',esc(fmtDate(c.endDate))],
     ['月租金',money(c.monthlyRent)],['押金',money(c.deposit)],
     ['付款方式',esc(c.payCycle)+'（每 '+cycleMonths(c)+' 个月一期）'],
-    ['本次收租时间',esc(rentDateOf(c))+' <span class="sub-txt">（每期以此日期按付款方式顺延）</span>'],
+    ['本次收租时间',esc(rentDateOf(c))+' <span class="sub-txt">（账期与每期收租时间均以此为准，按付款方式顺延）</span>'],
     ['本次租金',esc(c.rentSettled||'待收')+(firstBillIndex(c)?' <span class="sub-txt">（已收妥，账单从下一期开始）</span>':' <span class="sub-txt">（本次仍为待收账单）</span>')],
     ['下次交租时间',(ni&&ni.date)?(esc(ni.date)+' '+dueBadge(ni)):'<span class="sub-txt">合同期内已结清</span>'],
     ['合同状态',badge(c.status)],
@@ -2061,8 +2102,11 @@ function viewBills(){
   var strip='<div class="sum-strip"><span>筛选结果 <b>'+list.length+'</b> 笔</span><span>应收合计 <b>'+money(tot)+'</b></span>'+
     '<span class="ok-txt">已收 <b>'+money(paid)+'</b></span><span>待收 <b>'+money(tot-paid)+'</b></span>'+
     '<span class="danger-txt">逾期 <b>'+overdueN+'</b> 笔</span></div>';
+  var staleN=Object.keys(misalignedBillIds(db)).length;
+  var staleHTML=staleN?'<div class="form-note warn" style="margin:0 0 12px">检测到 <b>'+staleN+
+    '</b> 笔旧版错位账单（账期与收租时间不匹配）。点右上角「批量生成账单」并选「清理（推荐）」即可删除这些未收款账单、按新规则重建；已收账单与手工编辑过的账单不受影响。</div>':'';
   document.getElementById('view').innerHTML='<div class="card"><div class="card-head"><h2>租金账单 <span class="hint">共 '+db.bills.length+' 笔</span></h2></div>'+
-    '<div class="card-body" style="padding-bottom:4px"><div class="filters">'+
+    '<div class="card-body" style="padding-bottom:4px">'+staleHTML+'<div class="filters">'+
       selectFilter('bills','status',[{value:'all',label:'全部状态'},{value:'未收',label:'未收'},{value:'部分',label:'部分收款'},{value:'已收',label:'已收'},{value:'逾期',label:'逾期'},{value:'soon',label:'近 '+leadDays()+' 天到期 / 逾期'}],f.status,'状态')+
       selectFilter('bills','month',monthOptions(),f.month,'账期')+
       searchBox('bills','搜索租客 / 房号 / 账期',f.q)+
@@ -2070,16 +2114,24 @@ function viewBills(){
     tableHTML([{title:'房间'},{title:'租客'},{title:'账期'},{title:'收租时间'},{title:'应收金额',num:true},{title:'已收金额',num:true},{title:'待收',num:true},{title:'状态'},{title:'收款日期'},{title:'操作',num:true}],rows,'没有符合条件的账单，可用右上角「批量生成账单」按合同自动生成。','bill')+'</div>';
 }
 function genBillsDialog(){
+  var staleN=Object.keys(misalignedBillIds(db)).length;
   openForm({
     title:'批量生成租金账单',
     okText:'开始生成',
-    note:'系统会为所有<b>生效中 / 已到期</b>的合同逐期生成账单，直到所选月份为止。<b>每期收租时间 = 合同的本次收租时间 + 付款周期 × 期数</b>（季付即每 3 个月的同一天）。「本次租金」标为已收讫的合同从下一期开始生成，标为待收的从本期开始。已存在的账期会自动跳过，不会重复生成；超出合同到期日的账期不会生成。',
+    note:'系统会为所有<b>生效中 / 已到期</b>的合同逐期生成账单，直到所选月份为止。<b>账期与收租时间共用同一期次</b>：本次收租时间收的是紧接着的一个付款周期（账期从收租日次月开始），<b>每期收租时间 = 本次收租时间 + 付款周期 × 期数</b>（季付即每 3 个月的同一天）；新签合同首期账期仍取起租月。「本次租金」标为已收讫的合同从下一期开始生成，标为待收的从本期开始。已存在的账期会自动跳过，不会重复生成；超出合同到期日的账期不会生成。',
     fields:[{key:'month',label:'生成至账期（含）',type:'month',required:true,def:curMonth(),full:true,
-      tip:'例如选择当月，会把所有合同从起租月到当月的账单一次性补齐'}],
+      tip:'例如选择当月，会生成到当月为止的账单；本次收租时间对应的下一期账单始终会生成'},
+      {key:'cleanStale',label:'旧版错位账单',type:'select',options:['清理（推荐）','保留'],
+       def:'清理（推荐）',full:true,
+       tip:'旧版会把账期与收租时间错开（如账期 2026-09 配收租 2029-02）。选「清理」将删除未收款、无备注的错位账单后按新规则重建；已收账单与手工编辑过的账单不动。'+
+           (staleN?'当前检测到 '+staleN+' 笔。':'')}],
     onSubmit:function(v){
+      var removed=(v.cleanStale!=='保留') ? removeMisalignedBills(db) : 0;
       var n=makeBillsFor(db,v.month);
       save(); render();
-      toast(n>0?'已生成 '+n+' 笔账单':'该期间账单已全部存在，无需重复生成',n>0?'ok':'');
+      var msg=n>0?'已生成 '+n+' 笔账单':'该期间账单已全部存在，无需重复生成';
+      if(removed) msg+='；已清理 '+removed+' 笔旧版错位账单';
+      toast(msg,(n>0||removed)?'ok':'');
     }
   });
 }
@@ -2361,8 +2413,8 @@ function addContract(){
 /* 改了收租时间后，把该合同未结清账单的收租时间同步到新锚点；已收账单保留历史不动 */
 function resyncBillDueDates(c, oldCycle){
   if(CYCLE[oldCycle]!==cycleMonths(c)) return -1;   // 付款方式变了，期次结构变化，不自动重算
-  var span=cycleMonths(c), startM=String(c.startDate||'').slice(0,7), n=0;
-  if(!isDateStr(String(c.startDate||''))) return 0;
+  var span=cycleMonths(c), startM=billStartMonth(c), n=0;
+  if(!/^\d{4}-\d{2}$/.test(startM)) return 0;
   db.bills.forEach(function(b){
     if(b.contractId!==c.id || billStatus(b)==='已收') return;
     var diff=(+b.period.slice(0,4)*12 + +b.period.slice(5,7))-(+startM.slice(0,4)*12 + +startM.slice(5,7));
@@ -2375,7 +2427,7 @@ function resyncBillDueDates(c, oldCycle){
 /* 把「本次租金」改为已收讫时，若首期账单还在待收，自动登记收讫并补一笔收入流水，
    使页面下次交租时间立即顺延到下一期，而不会出现「改了却没变化」。 */
 function settleFirstPeriod(c){
-  var startM=String(c.startDate||'').slice(0,7);
+  var startM=billStartMonth(c);
   var b=db.bills.filter(function(x){return x.contractId===c.id && x.period===startM;})[0];
   if(!b || billStatus(b)==='已收') return 0;
   var rest=round2(num(b.amount)-num(b.paidAmount));
@@ -2561,15 +2613,18 @@ document.addEventListener('click',function(e){
     case 'go-gen': genBillsDialog(); break;
     case 'gen-bills-for': {
       var c=getContract(id); if(!c) break;
-      var before=db.bills.length;
       var saved=db.contracts;
       var req=el.getAttribute('data-month')||curMonth();
       var endM=String(c.endDate||'').slice(0,7);
       var through=(!endM || req<endM) ? req : endM;
+      var removed=removeMisalignedBills(db,c.id);
+      var before=db.bills.length;
       try{ db.contracts=[c]; makeBillsFor(db,through); }
       finally{ db.contracts=saved; }
       var n=db.bills.length-before; save(); modalClose(); render();
-      toast(n>0?'已为该合同生成 '+n+' 笔账单':'账单已全部存在，无需重复生成',n>0?'ok':'');
+      var msg=n>0?'已为该合同生成 '+n+' 笔账单':'账单已全部存在，无需重复生成';
+      if(removed) msg+='；已清理 '+removed+' 笔旧版错位账单';
+      toast(msg,(n>0||removed)?'ok':'');
       break;
     }
     case 'test-notify': testNotify(); break;
