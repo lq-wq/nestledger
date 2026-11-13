@@ -261,4 +261,26 @@ check('README 说明概览本月口径', readme.includes('概览本月口径') &
 check('README 账单回归项数已同步', readme.includes('（111 项）') && !readme.includes('（83 项）'));
 check('部署文档含概览待收排障', doc.includes('概览「本月待收」是 ¥0') && doc.includes('本期收租时间'));
 
+// ---- v1.3.2 · 多源取最高版本与更新诊断 ----
+check('服务端并发拉取所有更新源', srv.includes('async function fetchManifests()') && srv.includes('Promise.all(urls.map('));
+check('不再使用首个成功即停的取源逻辑', !srv.includes('async function fetchManifest()') && !srv.includes('return { json, source: url };'));
+check('按版本号降序取最高', srv.includes('cmpVersion(b.version, a.version)'));
+check('Release 资产优先于 jsDelivr 分支缓存', srv.indexOf('releases/download/latest') < srv.indexOf('cdn.jsdelivr.net/gh/'));
+check('标记 CDN 缓存滞后源', srv.includes('c.stale = true') && srv.includes('staleSources:'));
+check('支持多个自定义镜像源', srv.includes('UPDATE_MANIFEST_URLS'));
+check('更新请求携带 no-cache 头', srv.includes("'Cache-Control': 'no-cache'"));
+check('apply 从最高版本逐个校验并回退', srv.includes('for (const cand of candidates)') && srv.includes('所有新版更新包均未通过校验'));
+check('already 返回明确诊断而非笼统提示', srv.includes("hint: '更新源最高版本为") && srv.includes('sourcesChecked: checked, hasUpdate: false'));
+check('status 暴露源检查明细', srv.includes('sourcesChecked: updateState.sourcesChecked || []'));
+for (const frag of ['function updSourcesHTML(', 'sourcesChecked:[],staleSources:0', "r.hint||('更新源最高为 v", '缓存滞后', 'upd-sources-title']) {
+  check('前端版本模块含 ' + frag.slice(0, 26), html.includes(frag));
+}
+check('前端不再笼统提示已是最新版本', !html.includes("toast('已是最新版本','ok')"));
+check('单文件版同步更新源诊断模块', !localSrc || (localSrc.includes('function updSourcesHTML(') && localSrc.includes('sourcesChecked:[],staleSources:0')));
+const updTest = read('scripts/test-update.mjs');
+check('更新回归覆盖多源场景', updTest.includes('首个源陈旧仍能发现新版本') && updTest.includes('最高版本包损坏时自动回退次高'));
+check('CHANGELOG 含 v1.3.2', read('CHANGELOG.md').includes('v1.3.2'));
+check('README 说明多源与 CDN 缓存', readme.includes('多源') && readme.includes('CDN 缓存'));
+check('部署文档含「已是最新版本」排障', doc.includes('已是最新版本') && doc.includes('UPDATE_MANIFEST_URL'));
+
 console.log('\n全部通过：' + passed + ' 项检查\n');

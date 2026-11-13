@@ -2,6 +2,23 @@
 
 本项目使用 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## v1.3.2 — 2026-11-13
+
+**修复网页端自动更新「提示已是最新版本」却升不上去。**
+
+用户反馈：NAS 上是 v1.3.0，GitHub 已发布 v1.3.1，网页点更新却一直提示「已是最新版本」。用 v1.3.0 的真实服务端连真实 GitHub 完整复现：
+
+- **根因**：服务端 `fetchManifest()` 采用「第一个成功返回就停」的回退策略，而首选源 `jsDelivr @main` 对 GitHub 分支文件有 `max-age=604800 / s-maxage=43200` 的 **CDN 缓存**（实测响应 `Age: 5032`），仍返回 v1.3.0 的旧清单。这份清单格式完全合法，于是服务端直接采纳，永远不再尝试后面的 raw.githubusercontent 与 Release 资产（当时两者都已是 v1.3.1）。`performCheck()` 得到 `latest=v1.3.0`、`hasUpdate=false`；点「更新到 vX」时 `performApply()` 又重新拉到同一份旧清单，走 `already:true` —— 两处都提示「已是最新版本」。实测 `Cache-Control: no-cache` 请求头与 `?_=` query 参数都绕不过 jsDelivr 的分支缓存。
+- **修复**：新增 `fetchManifests()`，**并发拉取所有更新源**、按版本号降序（同版本按 `builtAt` 降序）排序，一律采用所有可达源中的最高版本；单个源陈旧或不可达都不会阻断更新。默认源顺序调整为 **GitHub Release 资产 → raw.githubusercontent → jsDelivr**（Release 资产由 Actions 每次发布覆盖，不走分支缓存）。
+- **校验回退**：`performApply()` 从最高版本开始逐个执行 sha256 / 体积 / 版本标记 / `node --check` 校验，某份包损坏时自动回退次高版本，不让一个坏源阻断更新。
+- **诊断可见**：`updateStatus()` 新增 `sourcesChecked` 与 `staleSources`；「关于与更新」弹窗列出每个源的版本与状态（最新 / 缓存滞后 / 不可达），「已是最新版本」提示改为带具体版本与来源的说明，`already` 返回带 `hint`，不再把三种情况混为一谈。
+- **多镜像**：新增 `UPDATE_MANIFEST_URLS`（逗号分隔多个自定义源），服务端自动取其中最高版本；国内可同时配多个镜像互为备份。
+- **应急通道（针对仍停留在 v1.3.0 的部署）**：修复代码要升级后才生效。v1.3.0 支持 `UPDATE_MANIFEST_URL` 且把它放在首位，因此在飞牛 Compose 的 `environment` 加一行 `UPDATE_MANIFEST_URL: https://github.com/lq-wq/nestledger/releases/download/latest/latest.json` 并重启项目，网页点「检查更新」即可直接升到最新版；升完可删掉这一行。实测该通道能成功安装新版覆盖层。
+
+`scripts/test-update.mjs` 增加「多源取最高版本」11 项（陈旧源 + 新版源 + 不可达源、全源陈旧诊断、最高版本坏包回退次高）；`scripts/check.mjs` 增补 21 项静态断言。真实网络验证：修复后服务端伪装内置 v1.3.0，**未配置任何应急源**时仍能识别 v1.3.1 并成功安装。
+
+**验证**：项目自检 216 项、更新链路 65 项（含多源 11 项）、账单回归 111 项、接口冒烟 23 项、自包含版真实启动 33 项、真实 Edge 浏览器弹窗 DOM 10 项、单文件本地版 4 项、ZIP 包内逐项校验；三个 shell 脚本语法与 NAS 部署前置自检通过。容器层与 GitHub Actions 因本机无 Docker / 未推送远端未实测。
+
 ## v1.3.1 — 2026-11-13
 
 **修复概览页「本月待收」不显示数据，并让本月收入在概览可见。**

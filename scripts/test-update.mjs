@@ -41,6 +41,10 @@ const OLD_VERSION = (() => {
   const [a, b, c] = BASE_VERSION.split('.').map(Number);
   return a + '.' + b + '.' + Math.max(0, c - 1);
 })();
+const NEWER_VERSION = (() => {
+  const [a, b, c] = BASE_VERSION.split('.').map(Number);
+  return a + '.' + b + '.' + (c + 2);
+})();
 
 const webBase = fs.readFileSync(path.join(ROOT, 'web/index.html'), 'utf8');
 const srvBase = fs.readFileSync(path.join(ROOT, 'server/index.js'), 'utf8');
@@ -75,10 +79,19 @@ function buildManifest(version, mode) {
 
 let fakeMode = 'good';
 let fakeDrop = false;
+let multiRoutes = null;   // 多源场景：按路径返回不同版本 / 状态，确定性可控
 const fakePort = await freePort();
 const fake = http.createServer((req, res) => {
   if (fakeDrop) { req.socket.destroy(); return; }
-  const m = buildManifest(fakeMode === 'oldver' ? OLD_VERSION : NEW_VERSION, fakeMode);
+  const q = String(req.url || '/').split('?')[0];
+  let version = (fakeMode === 'oldver' ? OLD_VERSION : NEW_VERSION);
+  let mode = fakeMode;
+  if (multiRoutes && Object.prototype.hasOwnProperty.call(multiRoutes, q)) {
+    const r = multiRoutes[q];
+    if (r === 'drop') { req.socket.destroy(); return; }
+    version = r.version; mode = r.mode;
+  }
+  const m = buildManifest(version, mode);
   const body = Buffer.from(JSON.stringify(m), 'utf8');
   res.writeHead(200, { 'Content-Type': 'application/json', 'Content-Length': body.length });
   res.end(body);
@@ -100,6 +113,7 @@ const env = {
 };
 const child = spawn(process.execPath, [path.join(ROOT, 'server/index.js')], { env, stdio: ['ignore', 'pipe', 'pipe'] });
 let childLog = '';
+let child2 = null;
 child.stdout.on('data', d => { childLog += d; });
 child.stderr.on('data', d => { childLog += d; });
 const base = 'http://127.0.0.1:' + appPort;
@@ -238,10 +252,79 @@ try {
   const rs = await post('/api/update/restart');
   ok('非容器模式重启给出提示', !!rs.error && child.exitCode === null);
 
+  /* ---- 11. 多源取最高版本（jsDelivr CDN 缓存滞后回归） ----
+     源 A 返回陈旧版、源 B 返回新版、源 C 不可达；旧逻辑「首个成功即停」会卡在 A。 */
+  const dataDir2 = path.join(TMP, 'data2');
+  fs.mkdirSync(dataDir2, { recursive: true });
+  const appPort2 = await freePort();
+  const env2 = {
+    ...env,
+    PORT: String(appPort2), DATA_DIR: dataDir2,
+    UPDATE_MANIFEST_URL: '',
+    UPDATE_MANIFEST_URLS: [
+      'http://127.0.0.1:' + fakePort + '/a.json',
+      'http://127.0.0.1:' + fakePort + '/b.json',
+      'http://127.0.0.1:' + fakePort + '/c.json'
+    ].join(',')
+  };
+  multiRoutes = {
+    '/a.json': { version: OLD_VERSION, mode: 'good' },   // 模拟 jsDelivr 陈旧 CDN 缓存
+    '/b.json': { version: NEW_VERSION, mode: 'good' },   // 模拟 raw / Release 的新版
+    '/c.json': 'drop'                                     // 模拟不可达源
+  };
+  const base2 = 'http://127.0.0.1:' + appPort2;
+  const json2 = async p => (await fetch(base2 + p)).json();
+  const call2 = async (p, method) => (await fetch(base2 + p, {
+    method: method || 'GET',
+    ...(method === 'POST' ? { headers: { 'Content-Type': 'application/json' }, body: '{}' } : {})
+  })).json();
+  child2 = spawn(process.execPath, [path.join(ROOT, 'server/index.js')],
+    { env: env2, stdio: ['ignore', 'pipe', 'pipe'] });
+  let log2 = '';
+  child2.stdout.on('data', d => { log2 += d; });
+  child2.stderr.on('data', d => { log2 += d; });
+  for (let i = 0; i < 80; i++) {
+    if (child2.exitCode !== null) throw new Error('多源服务端提前退出：\n' + log2);
+    try { if ((await fetch(base2 + '/api/health')).ok) break; } catch (e) {}
+    await sleep(100);
+  }
+
+  const s2 = await json2('/api/update/status');
+  ok('多源配置被正确解析为 3 个源', s2.sources.length === 3);
+  const c2 = await json2('/api/update/check?force=1');
+  ok('首个源陈旧仍能发现新版本', c2.latest.version === NEW_VERSION && c2.hasUpdate === true);
+  ok('三个源都留下诊断记录', (c2.sourcesChecked || []).length === 3);
+  ok('陈旧源被标记 stale', (c2.sourcesChecked || []).some(s => s.version === OLD_VERSION && s.stale === true));
+  ok('不可达源被记录但不影响结论', (c2.sourcesChecked || []).some(s => s.ok === false));
+  ok('status 暴露滞后源数量', (await json2('/api/update/status')).staleSources >= 1);
+  const ap2 = await call2('/api/update/apply', 'POST');
+  ok('安装的是最高版本而非首个源的陈旧版', ap2.ok === true && !ap2.already && ap2.version === NEW_VERSION);
+  ok('覆盖层版本与最高版本一致',
+    JSON.parse(fs.readFileSync(path.join(dataDir2, 'app', 'version.json'), 'utf8')).version === NEW_VERSION);
+
+  multiRoutes = {
+    '/a.json': { version: OLD_VERSION, mode: 'good' },
+    '/b.json': { version: OLD_VERSION, mode: 'good' },
+    '/c.json': 'drop'
+  };
+  await call2('/api/update/rollback', 'POST');
+  const al = await call2('/api/update/apply', 'POST');
+  ok('全部源陈旧时 already 带明确诊断', al.already === true && typeof al.hint === 'string' && al.hint.includes('无需更新'));
+
+  multiRoutes = {
+    '/a.json': { version: NEWER_VERSION, mode: 'badSha' },   // 最高版本是坏包
+    '/b.json': { version: NEW_VERSION, mode: 'good' },       // 次高版本有效
+    '/c.json': 'drop'
+  };
+  const fb = await call2('/api/update/apply', 'POST');
+  ok('最高版本包损坏时自动回退次高', fb.ok === true && !fb.already && fb.version === NEW_VERSION);
+  ok('回退安装后前端可用', (await (await fetch(base2 + '/')).text()).includes("var APP_VERSION='" + NEW_VERSION + "';"));
+
   console.log('\n全部通过：' + pass + ' 项\n');
 } finally {
   fake.close();
   child.kill('SIGTERM');
+  if (child2) child2.kill('SIGTERM');
   await sleep(200);
   try { fs.rmSync(TMP, { recursive: true, force: true }); } catch (e) {}
 }

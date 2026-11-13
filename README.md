@@ -81,7 +81,7 @@ nestledger/
 │  ├─ check.mjs               # 项目自检（语法 / 外链 / 配置），CI 也在跑
 │  ├─ smoke.mjs               # 接口冒烟测试（本地起服务验证读写/快照/鉴权）
 │  ├─ test-bills.mjs          # 账单期次 / 生成可见性 / 概览口径回归（111 项）
-│  ├─ test-update.mjs         # 自动更新链路回归（本地假更新源，54 项）
+│  ├─ test-update.mjs         # 自动更新链路回归（本地假更新源，65 项）
 │  ├─ backup.sh               # 打包 data 目录
 │  └─ restore.sh              # 从备份包恢复
 ├─ docs/
@@ -130,7 +130,7 @@ docker compose up -d
 ```
 
 > ✅ 在飞牛 GUI 里用「粘贴 YAML」创建项目时，直接全选复制 `docker-compose.yml`
-> 的整份内容粘贴即可（约 76 KB）。不要加 `--build`，也不要再找 Dockerfile。
+> 的整份内容粘贴即可（约 78 KB）。不要加 `--build`，也不要再找 Dockerfile。
 > 如果仍报 `failed to read dockerfile`，说明项目里用的还是旧版 compose 内容，
 > 用当前版本的 `docker-compose.yml` 整体替换即可。
 
@@ -174,7 +174,7 @@ git push -u origin main
 
 **方式一：fnOS 图形界面粘贴 YAML（推荐，零文件、零 GitHub）**
 
-1. 打开 `docker-compose.yml`，**全选复制整份内容**（约 76 KB，大部分是一行应用包）
+1. 打开 `docker-compose.yml`，**全选复制整份内容**（约 78 KB，大部分是一行应用包）
 2. 飞牛 **Docker → Compose → 新增项目 → 粘贴 YAML**，项目名 `nestledger`，启动
 3. 访问 `http://<NAS 的 IP>:8787`
 
@@ -273,9 +273,12 @@ nestledger/data/
 | `UPDATE_INTERVAL` | `21600` | 自动检查间隔（秒），默认 6 小时 |
 | `UPDATE_TIMEOUT` | `8000` | 单个更新源超时（毫秒） |
 | `UPDATE_MANIFEST_URL` | 空 | 自定义更新清单地址。国内访问 GitHub 不稳定时填可达的镜像；配合 `UPDATE_ONLY_CUSTOM=1` 可禁止回退到 GitHub |
+| `UPDATE_MANIFEST_URLS` | 空 | 多个自定义源，用逗号分隔；服务端自动采用其中最高版本，适合国内多镜像互为备份 |
 | `UPDATE_OFF` | `1` 表示关闭 | 彻底关闭联网检查（镜像版 / 源码构建版已默认设置） |
 
-> 服务端默认按 **jsDelivr → raw.githubusercontent → Release asset** 多源回退；把 `UPDATE_MANIFEST_URL` 指向 Actions 发布的 `https://github.com/lq-wq/nestledger/releases/download/latest/latest.json`，还能实现「只有 CI 全部通过才更新」。
+> **v1.3.2 起改为并发多源取最高版本**：服务端同时请求 **GitHub Release 资产 → raw.githubusercontent → jsDelivr**，取所有可达源中版本号最高的那份，并把每个源的结果列在「关于与更新」弹窗里。原因是 jsDelivr 对 GitHub 分支文件有 12 小时~7 天的 **CDN 缓存**，旧版「第一个成功就停」的策略会被一份合法的旧清单卡住，导致一直提示「已是最新版本」。`no-cache` 请求头也绕不过该缓存，多源比对才是根本解法。
+>
+> 把 `UPDATE_MANIFEST_URL` 指向 Actions 发布的 `https://github.com/lq-wq/nestledger/releases/download/latest/latest.json`，还能实现「只有 CI 全部通过才更新」。**若你还停留在 v1.3.0 且点更新提示已是最新**，临时加这一行并重启项目即可直接升上来，升完可删除。
 >
 > ⚠️ **升级到 v1.3.0 是最后一次手动替换 YAML**：把新版 `docker-compose.yml` 整份粘贴进飞牛 Compose 项目并启动即可，`./data` 不动、数据不丢。镜像版 / 源码构建版仍由容器层或 `git pull --build` 更新，它们设了 `UPDATE_OFF=1`。
 
@@ -317,7 +320,7 @@ node scripts/smoke.mjs            # 起两个临时服务，验证读写 / 快�
 node scripts/test-standalone.mjs  # 真实启动验证内联包与主要接口
 node scripts/sync-version.mjs     # 改版本号后同步四处并重建更新包
 node scripts/test-bills.mjs       # 账单期次 / 生成可见性 / 概览口径回归（111 项）
-node scripts/test-update.mjs      # 自动更新链路回归（54 项）
+node scripts/test-update.mjs      # 自动更新链路回归（65 项）
 ```
 
 打版本标签（`git tag v1.2.0 && git push origin v1.2.0`）会触发 Actions 生成带版本号的镜像，方便回滚到指定版本。
@@ -351,6 +354,7 @@ node scripts/test-update.mjs      # 自动更新链路回归（54 项）
 | `UPDATE_AUTO` | `1` | 网页端发现新版后自动应用；`0` 只提示 |
 | `UPDATE_INTERVAL` | `21600` | 自动检查间隔（秒） |
 | `UPDATE_MANIFEST_URL` | 空 | 自定义更新清单地址（国内网络不稳时用镜像） |
+| `UPDATE_MANIFEST_URLS` | 空 | 多个自定义源（逗号分隔），自动取最高版本 |
 | `UPDATE_OFF` | `1` 关闭 | 彻底关闭联网检查，只改主 compose 的 `environment` |
 
 **默认主文件 `docker-compose.yml` 不读 `.env`**：上表变量请直接改 YAML 里的
@@ -429,6 +433,10 @@ v1.3.0 及更早版本用「账期覆盖当月」统计本月账单；而 v1.2.1
 
 **Q：怎么知道当前跑的是哪个版本？想手动升级怎么办？**  
 看顶栏右上角的版本号按钮（如 `v1.3.0`）。点开「关于与更新」能看到当前版本、内置版本、覆盖层版本与更新来源；点 **检查更新**，有新版时按钮会变成 **更新到 vX**。有新版时版本号旁边会出现红点。单文件本地版（`file://`）只显示版本号，不联网、不自动更新。
+
+**Q：GitHub 上已经有新版，网页却提示「已是最新版本」，怎么升？**  
+这是 **v1.3.0 / v1.3.1 的 CDN 缓存问题**，v1.3.2 已修复。旧版首选 jsDelivr 分支文件，而它有 12 小时~7 天缓存，会一直返回旧清单。修复代码要升级后才生效，所以先用应急通道：在主 compose 的 `environment` 加一行
+`UPDATE_MANIFEST_URL: https://github.com/lq-wq/nestledger/releases/download/latest/latest.json`，重启项目 →「关于与更新」→ **检查更新** → **更新到 vX**。升到 v1.3.2 后可删掉这一行（新版会自动并发比对全部源并取最高版本）。也可以直接把 v1.3.2 的 `docker-compose.yml` 整份替换粘贴一次。
 
 **Q：一直提示「更新检查未成功」，影响使用吗？**  
 不影响，业务功能与数据完全照常。常见原因是 NAS 访问 GitHub 超时。可在主 compose 的 `environment` 加 `UPDATE_MANIFEST_URL` 指向国内可达的更新清单镜像；或设 `UPDATE_AUTO: 0` 只手动检查，甚至 `UPDATE_OFF: 1` 彻底关闭。检查失败不会写入任何文件。

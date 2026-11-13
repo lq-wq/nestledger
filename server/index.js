@@ -32,7 +32,7 @@ const BACKUP_KEEP = Math.max(1, Number(process.env.BACKUP_KEEP || 30));
 const BACKUP_ON_WRITE = process.env.BACKUP_ON_WRITE !== '0';
 const AUTH_USER = process.env.AUTH_USER || '';
 const AUTH_PASS = process.env.AUTH_PASS || '';
-const APP_VERSION = '1.3.1';
+const APP_VERSION = '1.3.2';
 // 容器启动器会写入内置包的真实版本；有覆盖层时它仍指内置版，避免与 APP_VERSION 混淆
 const BUILTIN_VERSION = process.env.NESTLEDGER_BUILTIN || APP_VERSION;
 
@@ -59,7 +59,7 @@ const updateCfg = {
 };
 const updateState = {
   lastCheck: null, lastError: null, latest: null,
-  hasUpdate: false, lastApplied: null, source: ''
+  hasUpdate: false, lastApplied: null, source: '', sourcesChecked: []
 };
 let updateBusy = false;
 
@@ -202,15 +202,20 @@ function effectiveWebDir() {
 }
 function manifestURLs() {
   const list = [];
+  // 可配置多个自定义镜像源（逗号 / 分号 / 空白分隔），服务端会自动取其中最高版本
+  const extras = String(process.env.UPDATE_MANIFEST_URLS || '')
+    .split(/[,;\s]+/).map(s => s.trim()).filter(Boolean);
+  for (const u of extras) list.push(u);
   const custom = String(process.env.UPDATE_MANIFEST_URL || '').trim();
   if (custom) list.push(custom);
-  if (UPDATE_ONLY_CUSTOM) return list;   // 自定义镜像源专用：不再回退到 GitHub
+  if (UPDATE_ONLY_CUSTOM) return [...new Set(list)];   // 自定义镜像源专用：不再回退到 GitHub
   if (!UPDATE_OFF) {
-    list.push('https://cdn.jsdelivr.net/gh/' + UPDATE_REPO + '@' + UPDATE_BRANCH + '/update/latest.json');
-    list.push('https://raw.githubusercontent.com/' + UPDATE_REPO + '/' + UPDATE_BRANCH + '/update/latest.json');
+    // Release 资产由 Actions 每次发布覆盖，不走 jsDelivr 的分支缓存，故放首位
     list.push('https://github.com/' + UPDATE_REPO + '/releases/download/latest/latest.json');
+    list.push('https://raw.githubusercontent.com/' + UPDATE_REPO + '/' + UPDATE_BRANCH + '/update/latest.json');
+    list.push('https://cdn.jsdelivr.net/gh/' + UPDATE_REPO + '@' + UPDATE_BRANCH + '/update/latest.json');
   }
-  return list;
+  return [...new Set(list)];
 }
 function fetchURL(url, timeout, redirects) {
   redirects = redirects || 0;
@@ -221,7 +226,11 @@ function fetchURL(url, timeout, redirects) {
     if (u.protocol !== 'https:' && u.protocol !== 'http:') return reject(new Error('仅支持 http/https 更新源'));
     const mod = u.protocol === 'https:' ? https : http;
     const req = mod.get(u, {
-      headers: { 'User-Agent': 'NestLedger-Updater/1.0', 'Accept': 'application/json, text/plain, */*' },
+      headers: {
+        'User-Agent': 'NestLedger-Updater/1.0',
+        'Accept': 'application/json, text/plain, */*',
+        'Cache-Control': 'no-cache', 'Pragma': 'no-cache'
+      },
       timeout: timeout || UPDATE_TIMEOUT
     }, res => {
       if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
@@ -247,19 +256,46 @@ function fetchURL(url, timeout, redirects) {
     req.on('error', e => reject(e));
   });
 }
-async function fetchManifest() {
+/* 并发拉取所有更新源，按版本号降序（同版本按构建时间降序）返回候选。
+   jsDelivr 对 GitHub 分支文件有 12 小时~7 天的 CDN 缓存，连 no-cache 请求头也绕不过，
+   因此绝不能「第一个成功就返回」：否则一个陈旧的合法清单就会让更新永远停在旧版本。 */
+function sourceLabel(url) {
+  if (url.includes('releases/download/latest')) return 'GitHub Release';
+  if (url.includes('raw.githubusercontent.com')) return 'GitHub raw';
+  if (url.includes('cdn.jsdelivr.net')) return 'jsDelivr CDN';
+  try {
+    const u = new URL(url);
+    const seg = u.pathname.split('/').filter(Boolean).pop();
+    return seg && seg !== 'latest.json' ? u.hostname + '/' + seg : u.hostname;
+  } catch (e) { return '自定义源'; }
+}
+async function fetchManifests() {
   const urls = manifestURLs();
   if (!urls.length) throw new Error('自动更新已关闭');
-  let lastErr = null;
-  for (const url of urls) {
+  const results = await Promise.all(urls.map(async url => {
     try {
       const buf = await fetchURL(url);
       const json = JSON.parse(buf.toString('utf8'));
       if (!json || json.schema !== 1) throw new Error('更新清单格式不支持');
-      return { json, source: url };
-    } catch (e) { lastErr = e; }
+      if (!/^\d+\.\d+\.\d+/.test(String(json.version || ''))) throw new Error('清单版本号不合法');
+      return { url, json, ok: true, version: String(json.version), builtAt: String(json.builtAt || ''), error: null };
+    } catch (e) {
+      return { url, json: null, ok: false, version: null, builtAt: '', error: e.message || String(e) };
+    }
+  }));
+  const candidates = results.filter(r => r.ok).sort((a, b) =>
+    cmpVersion(b.version, a.version) || b.builtAt.localeCompare(a.builtAt));
+  if (!candidates.length) {
+    throw new Error('所有更新源均不可用（' + ((results.find(r => r.error) || {}).error || '未知') + '）');
   }
-  throw new Error('所有更新源均不可用（' + (lastErr ? lastErr.message : '未知') + '）');
+  const checked = results.map(r => ({
+    source: sourceLabel(r.url), url: r.url, ok: r.ok,
+    version: r.version, builtAt: r.builtAt,
+    stale: false, error: r.error
+  }));
+  const top = candidates[0].version;
+  for (const c of checked) if (c.ok && cmpVersion(c.version, top) < 0) c.stale = true;
+  return { candidates, checked };
 }
 /* 严格校验：整体 sha256 → 解压 → 逐文件 sha256 / 体积 / 版本标记 → 服务端语法 */
 function verifyManifest(m) {
@@ -306,17 +342,21 @@ function updateStatus() {
     lastCheck: updateState.lastCheck, lastError: updateState.lastError,
     latest: updateState.latest, hasUpdate: !!updateState.hasUpdate && !UPDATE_OFF,
     lastApplied: updateState.lastApplied,
+    sourcesChecked: updateState.sourcesChecked || [],
+    staleSources: (updateState.sourcesChecked || []).filter(s => s.stale).length,
     container: IS_CONTAINER, interval: UPDATE_INTERVAL
   };
 }
 async function performCheck() {
   if (UPDATE_OFF) throw new Error('自动更新已在服务端关闭（UPDATE_OFF=1）');
-  const { json, source } = await fetchManifest();
+  const { candidates, checked } = await fetchManifests();
+  const best = candidates[0];
   updateState.lastCheck = new Date().toISOString();
   updateState.lastError = null;
-  updateState.source = source;
-  updateState.latest = { version: String(json.version), notes: String(json.notes || ''), builtAt: json.builtAt || null };
-  updateState.hasUpdate = cmpVersion(json.version, activeVersion()) > 0;
+  updateState.source = best.url;
+  updateState.sourcesChecked = checked;
+  updateState.latest = { version: best.version, notes: String(best.json.notes || ''), builtAt: best.json.builtAt || null };
+  updateState.hasUpdate = cmpVersion(best.version, activeVersion()) > 0;
   await saveUpdateState();
   return updateStatus();
 }
@@ -340,19 +380,40 @@ async function performApply() {
   if (updateBusy) throw new Error('已有更新任务正在进行');
   updateBusy = true;
   try {
-    const { json, source } = await fetchManifest();
+    const { candidates, checked } = await fetchManifests();
     const now = new Date().toISOString();
-    if (cmpVersion(json.version, activeVersion()) <= 0) {
+    const cur = activeVersion();
+    const best = candidates[0];
+    const latest = { version: best.version, notes: String(best.json.notes || ''), builtAt: best.json.builtAt || null };
+    // 所有源里最高的版本也不高于当前：明确交代检查到什么，而不是笼统一句「已是最新」
+    if (cmpVersion(best.version, cur) <= 0) {
       updateState.lastCheck = now;
       updateState.lastError = null;
-      updateState.source = source;
-      updateState.latest = { version: String(json.version), notes: String(json.notes || ''), builtAt: json.builtAt || null };
+      updateState.source = best.url;
+      updateState.sourcesChecked = checked;
+      updateState.latest = latest;
       updateState.hasUpdate = false;
       await saveUpdateState();
-      return { ok: true, already: true, version: activeVersion() };
+      const stale = checked.filter(s => s.stale).length;
+      return {
+        ok: true, already: true, version: cur, latest, source: best.url,
+        sourcesChecked: checked, hasUpdate: false,
+        hint: '更新源最高版本为 v' + best.version + '，当前已是 v' + cur + '，无需更新。' +
+          (stale ? '其中 ' + stale + ' 个更新源仍返回更旧版本（CDN 缓存），已自动采用最高版本。' : '')
+      };
     }
-    const files = verifyManifest(json);
-    checkServerSyntax(files['server/index.js']);
+    // 从最高版本开始逐个校验；单份包损坏时自动回退次高，不让一个坏源阻断更新
+    let picked = null, files = null, lastVerifyErr = null;
+    for (const cand of candidates) {
+      if (cmpVersion(cand.version, cur) <= 0) break;
+      try {
+        const f = verifyManifest(cand.json);
+        checkServerSyntax(f['server/index.js']);
+        picked = cand; files = f; break;
+      } catch (e) { lastVerifyErr = e; }
+    }
+    if (!picked) throw new Error('所有新版更新包均未通过校验：' + (lastVerifyErr ? lastVerifyErr.message : '未知'));
+    const json = picked.json, source = picked.url;
 
     // 更新前先留一份数据快照；失败不阻断更新，但会记录日志
     let snapshot = null;
@@ -381,6 +442,7 @@ async function performApply() {
     updateState.lastCheck = now;
     updateState.lastError = null;
     updateState.source = source;
+    updateState.sourcesChecked = checked;
     updateState.latest = { version: String(json.version), notes: String(json.notes || ''), builtAt: json.builtAt || null };
     updateState.hasUpdate = false;
     updateState.lastApplied = { version: String(json.version), at: now, snapshot };
@@ -394,7 +456,7 @@ async function performApply() {
     log('更新完成 v' + json.version + '（快照 ' + (snapshot || '无') + '，服务端' + (serverChanged ? '需重启' : '无变化') + (restarting ? '，即将重启' : '') + '）');
     return {
       ok: true, version: String(json.version), files: ['web/index.html', 'server/index.js'],
-      snapshot, needRestart: serverChanged, restarting
+      snapshot, needRestart: serverChanged, restarting, source, sourcesChecked: checked
     };
   } finally { updateBusy = false; }
 }
@@ -425,6 +487,7 @@ async function loadUpdateState() {
     updateState.hasUpdate = !!s.hasUpdate;
     updateState.lastApplied = s.lastApplied || null;
     updateState.source = s.source || '';
+    updateState.sourcesChecked = Array.isArray(s.sourcesChecked) ? s.sourcesChecked : [];
   } catch (e) {}
 }
 function startAutoUpdate() {

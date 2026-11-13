@@ -21,7 +21,7 @@ failed to solve: failed to read dockerfile: open Dockerfile: no such file or dir
 
 ### 最快解（三步，不需要上传任何文件）
 
-1. 打开最新版 **`docker-compose.yml`（默认主文件，约 76 KB）**，Ctrl+A **全选复制整份内容**
+1. 打开最新版 **`docker-compose.yml`（默认主文件，约 78 KB）**，Ctrl+A **全选复制整份内容**
 2. 飞牛 **Docker → Compose** → 打开你现有的 `nestledger` 项目 → 编辑 YAML → **整体粘贴替换**旧内容 → 启动；或删掉旧项目重新「新增项目 → 粘贴 YAML」
 3. 浏览器打开 `http://<NAS 的 IP>:8787`
 
@@ -109,7 +109,7 @@ ZIP 解开后是 `nestledger/` 这一层；如果又新建同名文件夹再解�
 
 ## 2. 方式一 · GUI 粘贴主文件（推荐，零前提）
 
-1. 打开 `docker-compose.yml`，**全选复制整份内容**（约 76 KB，大部分是一行应用包）
+1. 打开 `docker-compose.yml`，**全选复制整份内容**（约 78 KB，大部分是一行应用包）
 2. 飞牛 **Docker → Compose → 新增项目 → 粘贴 YAML**，项目名 `nestledger`，启动
 3. 访问 `http://<NAS 的 IP>:8787`
 
@@ -222,8 +222,8 @@ docker compose -f docker-compose.build.yml ps
 
 ### 网页端自动更新（v1.3.0 起，方式一 / 二）
 
-**这是最后一次需要手动替换 YAML。** 把新版 `docker-compose.yml`（约 76 KB）整份粘贴进现有 Compose 项目并启动，
-`./data` 不动、数据不丢。之后链路全自动：
+把新版 `docker-compose.yml` 整份粘贴进现有 Compose 项目并启动，`./data` 不动、数据不丢。之后链路全自动：
+**若你仍停留在 v1.3.0 / v1.3.1 且点更新提示「已是最新版本」**，不必粘贴整份 YAML，改用第 10 节的应急一行配置即可。
 
 ```text
 GitHub push → Actions「Build and Publish Image」
@@ -247,6 +247,7 @@ NAS 服务端每 6 小时（或网页点「检查更新」）拉取清单
 例如 `UPDATE_MANIFEST_URL: https://你的镜像/update/latest.json`，再加 `UPDATE_ONLY_CUSTOM: 1` 禁止回退。
 若想「只有 CI 全部通过才更新」，把 `UPDATE_MANIFEST_URL` 填成
 `https://github.com/lq-wq/nestledger/releases/download/latest/latest.json`（这个地址由 Actions 成功后才发布）。
+**v1.3.2 起**服务端会并发请求全部更新源并**自动采用最高版本**，还可用 `UPDATE_MANIFEST_URLS`（逗号分隔）一次配置多个国内镜像互为备份；弹窗「更新源检查」会列出每个源的版本与状态。
 
 | 变量 | 默认 | 说明 |
 | --- | --- | --- |
@@ -392,6 +393,27 @@ v1.2.1 起账期从本次收租日的次月起算（如 2026-11-24 收租对应�
   缺收租时间的旧账单自动回退为账期覆盖，历史数据不会凭空消失。
 - **本月收支**：卡片下方新增小计条，按财务流水日期显示本月收入 / 支出 / 净额与本月应收账单笔数。
   因此即使只在「财务流水」手工记了一笔收入、没生成账单，概览也能看到这笔钱。
+
+### 提示「已是最新版本」，但 GitHub 上明明已经有新版
+
+**这是 v1.3.0 / v1.3.1 的 jsDelivr CDN 缓存问题，v1.3.2 已修复。** 旧版按「第一个成功就停」拉取更新源，而 `jsDelivr @main` 对 GitHub 分支文件缓存 12 小时~7 天（响应头 `max-age=604800`），会一直返回旧清单；服务端因此认为没有新版，点「更新」又走 `already` 分支，还是同一句提示。实测 `Cache-Control: no-cache` 与带随机 query 都绕不过该缓存。
+
+修复代码要升级后才生效，所以按下面**任选一条**先升上去：
+
+**方式 A · 改一行（推荐，不用粘贴 76 KB YAML）**
+1. 飞牛 **Compose → 找到 nestledger 项目 → 编辑 YAML**
+2. 在 `environment:` 里加一行：
+   ```yaml
+   UPDATE_MANIFEST_URL: https://github.com/lq-wq/nestledger/releases/download/latest/latest.json
+   ```
+3. 保存并**重启项目**（不是只刷新网页）
+4. 打开网页 → 顶栏版本号 →「关于与更新」→ **检查更新** → 应显示「发现新版本」→ **更新到 vX**
+5. 升到 v1.3.2 后，这行可以删掉：新版会并发比对全部源并取最高版本，即使 jsDelivr 仍缓存旧版也不影响
+
+**方式 B · 一次性全量替换**：打开 v1.3.2 的 `docker-compose.yml` → Ctrl+A 全选复制 → 编辑现有项目整体替换 → 启动（**不要加 `--build`**）。`./data` 不动，数据不丢。
+
+> 判断依据：点开「关于与更新」，v1.3.2 起会显示**更新源检查**明细，逐条列出 GitHub Release / GitHub raw / jsDelivr 的版本，滞后源标「缓存滞后」、连不上的标「不可达」。如果弹窗里没有这块，说明还在跑旧版。
+> 另需注意：GitHub 上的 `main` 分支与 Release「latest」资产必须已经是新版（确认 Actions「Build and Publish Image」跑完），否则任何一个源都不会有新清单。
 
 ### 顶栏没有版本号按钮 / 点「检查更新」报错
 

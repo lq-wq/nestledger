@@ -478,6 +478,18 @@ tbody tr.is-picked>td{background:var(--accent-soft)}
 .upd-actions{display:flex;flex-wrap:wrap;gap:9px;align-items:center;margin-top:16px}
 .upd-note{font-size:11.5px;line-height:1.75;color:var(--muted);margin-top:14px}
 .upd-note code{background:var(--surface-2);padding:1px 5px;border-radius:4px;font-size:11px}
+.upd-sources{margin-top:14px;padding-top:12px;border-top:1px solid var(--border-soft)}
+.upd-sources-title{font-size:11.5px;color:var(--muted);margin-bottom:8px;line-height:1.6}
+.upd-src-list{display:flex;flex-direction:column;gap:5px}
+.upd-src{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:11.5px;line-height:1.55;padding:6px 9px;border:1px solid var(--border-soft);border-radius:var(--radius-btn);background:var(--surface-2)}
+.upd-src .src-name{color:var(--text);font-weight:650;min-width:96px}
+.upd-src .src-ver{color:var(--sub);font-variant-numeric:tabular-nums}
+.upd-src .src-err{color:var(--muted);font-size:10.5px;word-break:break-all}
+.upd-src .src-tag{margin-left:auto;font-size:10.5px;font-weight:650;padding:1px 8px;border-radius:var(--radius-chip);white-space:nowrap}
+.upd-src .src-tag.tag-ok{background:var(--ok-bg);color:var(--ok)}
+.upd-src .src-tag.tag-stale{background:var(--warn-bg);color:var(--warn-ink)}
+.upd-src .src-tag.tag-fail{background:var(--danger-bg);color:var(--danger-ink)}
+@media(max-width:760px){.upd-src .src-name{min-width:0}}
 @media(max-width:760px){.upd-grid{grid-template-columns:82px 1fr}}
 </style>
 </head>
@@ -526,7 +538,7 @@ tbody tr.is-picked>td{background:var(--accent-soft)}
 var APP_NAME = '栖间';
 var APP_NAME_EN = 'NestLedger';
 var STORE_KEY = 'rental_manager_db_v1';
-var APP_VERSION='1.3.1';  /* 由 scripts/sync-version.mjs 维护 */
+var APP_VERSION='1.3.2';  /* 由 scripts/sync-version.mjs 维护 */
 /* 界面主题偏好单独存放：不进入业务数据 db，也不写入 JSON 备份 */
 var THEME_KEY = 'rental_manager_theme_v1';
 var currentTheme = 'light';
@@ -2815,6 +2827,7 @@ var upd={
   mode:'local',version:APP_VERSION,builtin:APP_VERSION,overlay:null,
   latest:null,hasUpdate:false,auto:true,autoRestart:true,enabled:false,
   lastCheck:'',lastError:'',source:'',lastApplied:null,
+  sourcesChecked:[],staleSources:0,
   checking:false,applying:false,checked:false
 };
 function updServerMode(){ return location.protocol==='http:'||location.protocol==='https:'; }
@@ -2871,6 +2884,8 @@ function updApplyStatus(s){
   upd.latest=s.latest||null;
   upd.hasUpdate=!!s.hasUpdate;
   upd.lastApplied=s.lastApplied||null;
+  upd.sourcesChecked=Array.isArray(s.sourcesChecked)?s.sourcesChecked:[];
+  upd.staleSources=typeof s.staleSources==='number'?s.staleSources:upd.sourcesChecked.filter(function(x){return x&&x.stale;}).length;
   upd.checked=true;
   refreshUpdChip();
   if(document.getElementById('updPanel')) updRenderPanel();
@@ -2891,7 +2906,7 @@ function updCheck(force){
     refreshUpdChip();
     if(r.error){ if(force) toast('检查失败：'+upd.lastError,'err'); }
     else if(r.hasUpdate) toast('发现新版本 v'+r.latest.version,'ok');
-    else if(force) toast('已是最新版本','ok');
+    else if(force) toast('当前 v'+upd.version+' 已是最新（更新源最高 v'+((upd.latest&&upd.latest.version)||upd.version)+'）','ok');
     updRenderPanel();
   }).catch(function(e){
     upd.checking=false; upd.lastError=(e&&e.message)||String(e);
@@ -2911,7 +2926,15 @@ function updApply(){
   updPost('/api/update/apply',{},180000).then(function(r){
     upd.applying=false;
     if(r.error) throw new Error(r.error);
-    if(r.already){ upd.applying=false; updRenderPanel(); toast('已是最新版本','ok'); return; }
+    if(r.already){
+      upd.applying=false;
+      if(Array.isArray(r.sourcesChecked)) upd.sourcesChecked=r.sourcesChecked;
+      if(r.latest) upd.latest=r.latest;
+      upd.staleSources=upd.sourcesChecked.filter(function(x){return x&&x.stale;}).length;
+      upd.hasUpdate=false; refreshUpdChip(); updRenderPanel();
+      toast(r.hint||('更新源最高为 v'+((r.latest&&r.latest.version)||upd.version)+'，无需更新'),'');
+      return;
+    }
     toast('已更新到 v'+r.version+(r.restarting?'，容器即将重启':''),'ok');
     if(r.restarting) setTimeout(updWaitReload,3000);
     else setTimeout(function(){ location.reload(); },1200);
@@ -2946,7 +2969,9 @@ function updBodyHTML(){
   row('当前版本','<b>v'+esc(upd.version)+'</b>'+(upd.overlay&&upd.overlay!==upd.builtin?' · 由自动更新覆盖层提供':' · 容器内置'));
   row('运行模式',upd.mode==='server'?'NAS / Docker 服务端':'单文件本地版');
   row('内置版本','v'+esc(upd.builtin)+(upd.overlay?' · 覆盖层 v'+esc(upd.overlay):''));
-  row('更新来源',upd.mode==='server'?esc(upd.source||'GitHub · lq-wq/nestledger'):'不联网');
+  var srcLabel='';
+  (upd.sourcesChecked||[]).forEach(function(s){ if(s.url===upd.source) srcLabel=s.source||''; });
+  row('更新来源',upd.mode==='server'?esc(srcLabel||upd.source||'GitHub · lq-wq/nestledger'):'不联网');
   row('最近检查',upd.lastCheck?esc(updFmt(upd.lastCheck)):'尚未检查');
   var notice='';
   if(upd.mode!=='server'){
@@ -2964,7 +2989,8 @@ function updBodyHTML(){
   }else if(upd.lastError){
     notice='<div class="notice danger"><div><b>更新检查未成功</b><br>'+esc(upd.lastError)+'<br>业务功能不受影响；可稍后重试，或在服务端配置 <code>UPDATE_MANIFEST_URL</code> 指定可达的更新源。</div></div>';
   }else if(upd.checked){
-    notice='<div class="sub-txt" style="margin-top:14px">✓ 已是最新版本。</div>';
+    notice='<div class="sub-txt" style="margin-top:14px">✓ 已是最新版本 v'+esc(upd.version)+'。'+
+      (upd.staleSources?'其中 '+upd.staleSources+' 个更新源仍返回更旧版本（CDN 缓存），已自动采用所有源中的最高版本。':'')+'</div>';
   }
   var cfg='';
   if(upd.mode==='server'&&upd.enabled){
@@ -2983,10 +3009,28 @@ function updBodyHTML(){
   return '<div id="updPanel">'+
     '<div class="upd-hero"><div><div class="upd-name">栖间 · NestLedger</div><div class="upd-desc">房屋租赁与收租台账 · 自托管</div></div>'+
     '<span class="upd-ver">v'+esc(upd.version)+'</span></div>'+
-    '<div class="upd-grid">'+rows+'</div>'+notice+cfg+extra+
+    '<div class="upd-grid">'+rows+'</div>'+notice+updSourcesHTML()+cfg+extra+
     '<div class="upd-note">更新包来自 GitHub 仓库 <code>lq-wq/nestledger</code>，由服务端校验 sha256 后写入 <code>data/app</code> 覆盖层；'+
     '更新前自动生成数据快照，失败可一键回退。单文件本地版与 NAS 版共用同一份前端代码。</div>'+
     '</div>';
+}
+function updSourcesHTML(){
+  if(upd.mode!=='server'||!upd.sourcesChecked||!upd.sourcesChecked.length) return '';
+  var rows='';
+  upd.sourcesChecked.forEach(function(s){
+    var tag,cls;
+    if(!s.ok){ tag='不可达'; cls='tag-fail'; }
+    else if(s.stale){ tag='缓存滞后'; cls='tag-stale'; }
+    else { tag='最新'; cls='tag-ok'; }
+    var ver=s.ok?('v'+esc(s.version||'')):'—';
+    var detail=s.ok?'':('<span class="src-err">'+esc(String(s.error||'请求失败').slice(0,60))+'</span>');
+    rows+='<div class="upd-src"><span class="src-name">'+esc(s.source||'')+'</span>'+
+      '<span class="src-ver">'+ver+'</span>'+detail+
+      '<span class="src-tag '+cls+'">'+tag+'</span></div>';
+  });
+  return '<div class="upd-sources"><div class="upd-sources-title">更新源检查 · 自动采用所有源中的最高版本'+
+    (upd.staleSources?' <span class="sub-txt">（'+upd.staleSources+' 个源滞后，不影响更新）</span>':'')+'</div>'+
+    '<div class="upd-src-list">'+rows+'</div></div>';
 }
 function updFootHTML(){
   var f='<button class="btn" data-act="modal-close">关闭</button>';
