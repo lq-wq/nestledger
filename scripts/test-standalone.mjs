@@ -16,6 +16,8 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import assert from 'node:assert/strict';
 import { fileURLToPath } from 'node:url';
+import { installFetchShim } from './fetch-shim.mjs';
+installFetchShim();
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'nestledger-st-'));
@@ -49,6 +51,7 @@ const env = {
   APP_BUNDLE: bm[1], APP_DIR: appDir, DATA_DIR: dataDir,
   WEB_DIR: path.join(appDir, 'web'), PORT: String(PORT), HOST: '127.0.0.1',
   BACKUP_KEEP: '3', BACKUP_ON_WRITE: '1', AUTH_USER: '', AUTH_PASS: '',
+  NESTLEDGER_TEST_NO_AUTH: '1',
   UPDATE_OFF: '1'   // 本地验证不联网检查更新
 };
 const child = spawn(process.execPath, ['-e', boot], {

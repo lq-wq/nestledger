@@ -80,7 +80,7 @@ const yaml = `# 栖间 · NestLedger —— 自包含版（默认主文件 · �
 #    在「飞牛 Docker → 设置 → 镜像加速」配置加速器，或把下面 image 一行
 #    改成你 NAS 能拉到的 node:22-alpine 完整地址（例如加速地址/library/node:22-alpine）。
 #
-# ⚠️ 端口 / 口令 / 备份份数直接改下面的 ports 与 environment，本文件不读 .env。
+# ⚠️ 端口 / 初始管理员 / 备份份数直接改下面的 ports 与 environment，本文件不读 .env。
 #
 # 🔄 自动更新（v1.3.0 起）：容器内每 6 小时检查一次 GitHub 仓库的
 #    update/latest.json，校验 sha256 后把新版前端 / 服务端写入 ./data/app 覆盖层，
@@ -124,7 +124,7 @@ services:
       # 彻底关闭自动更新：UPDATE_OFF: 1
       # 国内连不上 GitHub 时填可达的更新清单镜像，例如：
       # UPDATE_MANIFEST_URL: https://你的镜像/update/latest.json
-      # 需要口令时，在下面加两行（两个都要填）：
+      # 首次启动的初始管理员（v1.4.0 起默认 admin / admin123，登录后请在网页里改密）：
       # AUTH_USER: admin
       # AUTH_PASS: change-me
       APP_BUNDLE: "${bundle}"

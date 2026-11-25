@@ -283,4 +283,16 @@ check('CHANGELOG 含 v1.3.2', read('CHANGELOG.md').includes('v1.3.2'));
 check('README 说明多源与 CDN 缓存', readme.includes('多源') && readme.includes('CDN 缓存'));
 check('部署文档含「已是最新版本」排障', doc.includes('已是最新版本') && doc.includes('UPDATE_MANIFEST_URL'));
 
+// ---- v1.4.0 · 强制登录与用户管理 ----
+check('服务端提供完整登录接口', ['/api/auth/login', '/api/auth/logout', '/api/auth/password', '/api/auth/users'].every(p => srv.includes("'" + p + "'")));
+check('服务端强制保护业务接口', srv.includes("if (p.startsWith('/api/') && !await checkAuth(req, res)) return;"));
+check('登录状态接口对未登录开放', srv.includes("p === '/api/auth/me'") && srv.includes('authenticated: !!u'));
+check('密码采用加盐哈希', srv.includes('crypto.scryptSync(') && srv.includes("'scrypt$'"));
+check('会话使用 HttpOnly Cookie', srv.includes('HttpOnly; SameSite=Lax'));
+check('前端含登录遮罩与用户管理页', html.includes('id="loginMask"') && html.includes('function viewUsers(') && html.includes("case 'add-user':"));
+check('本地单文件版同样支持登录与用户管理', !localSrc || (localSrc.includes('id="loginMask"') && localSrc.includes('function viewUsers(') && localSrc.includes('function hashClientPassword(')));
+check('冒烟测试覆盖登录、改密、添加用户与权限', ['默认管理员可以登录', '可以修改自己的密码', '可以添加用户', '普通用户不能管理用户'].every(s => read('scripts/smoke.mjs').includes(s)));
+check('CHANGELOG 含 v1.4.0', read('CHANGELOG.md').includes('## v1.4.0'));
+check('README 说明强制登录', readme.includes('强制登录'));
+
 console.log('\n全部通过：' + passed + ' 项检查\n');

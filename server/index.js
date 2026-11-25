@@ -7,7 +7,8 @@
    · /api/backups    自动快照 / 手动快照 / 下载
    · /api/version    当前版本号（含自动更新覆盖层）
    · /api/update/*   从 GitHub 拉取更新包、校验、落盘、回滚、重启
-   · 原子写入 + 快照轮转 + 可选 HTTP Basic 认证
+   · 原子写入 + 快照轮转 + 强制账号登录（会话 Cookie / Basic 兼容）
+   · /api/auth/*  登录、登出、改密、用户管理
    只使用 Node 内置模块，无 npm 依赖
    ============================================================ */
 
@@ -32,7 +33,14 @@ const BACKUP_KEEP = Math.max(1, Number(process.env.BACKUP_KEEP || 30));
 const BACKUP_ON_WRITE = process.env.BACKUP_ON_WRITE !== '0';
 const AUTH_USER = process.env.AUTH_USER || '';
 const AUTH_PASS = process.env.AUTH_PASS || '';
-const APP_VERSION = '1.3.2';
+// 仅供自动化测试跳过登录；正常部署（包括未设置任何环境变量）一律强制登录
+const AUTH_BYPASS = process.env.NESTLEDGER_TEST_NO_AUTH === '1';
+const USERS_FILE = path.join(DATA_DIR, 'users.json');
+const SESSION_COOKIE = 'nestledger_sid';
+const SESSION_TTL = Math.max(600, Number(process.env.SESSION_TTL || 7 * 24 * 3600));
+const DEFAULT_ADMIN = 'admin';
+const DEFAULT_PASS = 'admin123';
+const APP_VERSION = '1.4.0';
 // 容器启动器会写入内置包的真实版本；有覆盖层时它仍指内置版，避免与 APP_VERSION 混淆
 const BUILTIN_VERSION = process.env.NESTLEDGER_BUILTIN || APP_VERSION;
 
@@ -62,6 +70,12 @@ const updateState = {
   hasUpdate: false, lastApplied: null, source: '', sourcesChecked: []
 };
 let updateBusy = false;
+
+/* ---- 账号与会话（内存态，用户库落盘 data/users.json）---- */
+let users = {};
+let authReady = false;
+const sessions = new Map();
+const loginFails = new Map();
 
 function log(msg) {
   console.log('[' + new Date().toISOString() + '] ' + msg);
@@ -526,12 +540,12 @@ function baseHeaders(extra) {
     'Cache-Control': 'no-store'
   }, extra || {});
 }
-function sendJSON(res, code, obj) {
+function sendJSON(res, code, obj, extraHeaders) {
   const body = Buffer.from(JSON.stringify(obj), 'utf8');
-  res.writeHead(code, baseHeaders({
+  res.writeHead(code, baseHeaders(Object.assign({
     'Content-Type': 'application/json; charset=utf-8',
     'Content-Length': body.length
-  }));
+  }, extraHeaders || {})));
   res.end(body);
 }
 function sendEmpty(res, code) {
@@ -572,31 +586,240 @@ async function parseBody(req) {
   try { return JSON.parse(raw.toString('utf8')); }
   catch (e) { throw Object.assign(new Error('请求不是合法 JSON'), { status: 400 }); }
 }
-function checkAuth(req, res) {
-  if (!AUTH_USER || !AUTH_PASS) return true;
-  const h = String(req.headers.authorization || '');
-  let ok = false;
-  if (h.startsWith('Basic ')) {
-    let pair = '';
-    try { pair = Buffer.from(h.slice(6), 'base64').toString('utf8'); } catch (e) {}
-    const i = pair.indexOf(':');
-    if (i >= 0) {
-      const a = crypto.createHash('sha256').update(pair.slice(0, i)).digest();
-      const b = crypto.createHash('sha256').update(AUTH_USER).digest();
-      const c = crypto.createHash('sha256').update(pair.slice(i + 1)).digest();
-      const d = crypto.createHash('sha256').update(AUTH_PASS).digest();
-      ok = crypto.timingSafeEqual(a, b) && crypto.timingSafeEqual(c, d);
+/* ---- 账号、密码与会话 ---- */
+function userKey(name) { return String(name || '').trim().toLowerCase(); }
+function validUsername(name) { return typeof name === 'string' && /^[A-Za-z0-9_.-]{2,32}$/.test(name.trim()); }
+function validPassword(pass) { return typeof pass === 'string' && pass.length >= 6 && pass.length <= 128; }
+function hashPassword(pass, salt) {
+  salt = salt || crypto.randomBytes(16).toString('hex');
+  return 'scrypt$' + salt + '$' + crypto.scryptSync(String(pass), salt, 64).toString('hex');
+}
+function verifyPassword(pass, stored) {
+  const parts = String(stored || '').split('$');
+  if (parts.length !== 3 || parts[0] !== 'scrypt') return false;
+  const a = Buffer.from(parts[2], 'hex');
+  const b = crypto.scryptSync(String(pass == null ? '' : pass), parts[1], 64);
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+function publicUser(u) {
+  return {
+    username: u.username, role: u.role, createdAt: u.createdAt || null,
+    passwordChangedAt: u.passwordChangedAt || null, mustChangePassword: !!u.mustChange
+  };
+}
+async function saveUsers() {
+  await atomicWrite(USERS_FILE, JSON.stringify({ version: 1, users }, null, 2));
+}
+let authLoading = null;
+async function ensureUsers() {
+  if (authReady) return;
+  if (!authLoading) authLoading = loadUsers().finally(() => { authLoading = null; });
+  return authLoading;
+}
+async function loadUsers() {
+  try {
+    const data = JSON.parse(await fsp.readFile(USERS_FILE, 'utf8'));
+    if (data && data.users && typeof data.users === 'object') users = data.users;
+  } catch (e) {
+    if (await exists(USERS_FILE)) {
+      const broken = USERS_FILE + '.broken-' + stamp();
+      await fsp.rename(USERS_FILE, broken).catch(() => {});
+      log('用户库损坏，已重命名坏文件：' + path.basename(broken));
     }
   }
-  if (!ok) {
-    res.writeHead(401, baseHeaders({
-      'WWW-Authenticate': 'Basic realm="NestLedger", charset="UTF-8"',
-      'Content-Type': 'text/plain; charset=utf-8'
-    }));
-    res.end('需要账号密码才能访问 栖间 · NestLedger');
-    return false;
+  if (!Object.keys(users).length) {
+    const seedName = validUsername(AUTH_USER) ? AUTH_USER.trim() : DEFAULT_ADMIN;
+    const seedPass = (AUTH_USER && AUTH_PASS) ? AUTH_PASS : DEFAULT_PASS;
+    users[userKey(seedName)] = {
+      username: seedName, role: 'admin', passHash: hashPassword(seedPass),
+      createdAt: new Date().toISOString(), passwordChangedAt: null,
+      mustChange: !(AUTH_USER && AUTH_PASS)
+    };
+    await saveUsers();
+    log('已创建初始管理员 ' + seedName + (seedPass === DEFAULT_PASS ? '（默认密码 ' + DEFAULT_PASS + '，请登录后立即修改）' : ''));
   }
-  return true;
+  authReady = true;
+}
+function parseCookies(header) {
+  const out = {};
+  String(header || '').split(';').forEach(function (part) {
+    const i = part.indexOf('=');
+    if (i < 0) return;
+    try { out[decodeURIComponent(part.slice(0, i).trim())] = decodeURIComponent(part.slice(i + 1).trim()); } catch (e) {}
+  });
+  return out;
+}
+function currentUser(req) {
+  const token = parseCookies(req.headers.cookie)[SESSION_COOKIE];
+  if (!token) return null;
+  const s = sessions.get(token);
+  if (!s) return null;
+  if (s.expires <= Date.now()) { sessions.delete(token); return null; }
+  return users[s.key] || null;
+}
+function sessionToken(req) { return parseCookies(req.headers.cookie)[SESSION_COOKIE] || ''; }
+function basicUser(req) {
+  const h = String(req.headers.authorization || '');
+  if (!h.startsWith('Basic ')) return null;
+  let pair = '';
+  try { pair = Buffer.from(h.slice(6), 'base64').toString('utf8'); } catch (e) {}
+  const i = pair.indexOf(':');
+  if (i < 0) return null;
+  const u = users[userKey(pair.slice(0, i))];
+  return (u && verifyPassword(pair.slice(i + 1), u.passHash)) ? u : null;
+}
+function clientIP(req) {
+  return String(req.headers['x-forwarded-for'] || '').split(',')[0].trim() || req.socket.remoteAddress || 'unknown';
+}
+function loginLocked(ip) {
+  const r = loginFails.get(ip);
+  return !!(r && r.until > Date.now() && r.count >= 8);
+}
+function noteLoginFail(ip) {
+  const r = loginFails.get(ip) || { count: 0, until: 0 };
+  if (r.until <= Date.now()) { r.count = 0; r.until = Date.now() + 5 * 60 * 1000; }
+  r.count++;
+  loginFails.set(ip, r);
+}
+function requireAdmin(u, res) {
+  if (u && u.role === 'admin') return true;
+  sendJSON(res, 403, { error: '仅管理员可以执行此操作' });
+  return false;
+}
+async function checkAuth(req, res) {
+  if (AUTH_BYPASS) return true;
+  if (currentUser(req) || basicUser(req)) return true;
+  sendJSON(res, 401, { error: '请先登录', loginRequired: true });
+  return false;
+}
+function dropSessions(key, keepToken) {
+  for (const [token, s] of sessions) if (s.key === key && token !== keepToken) sessions.delete(token);
+}
+function adminCount() {
+  return Object.keys(users).filter(function (k) { return users[k].role === 'admin'; }).length;
+}
+
+/* ---------------- 账号接口 ---------------- */
+async function handleAuth(req, res, p, method) {
+  await ensureUsers();
+
+  // 未登录也能查询登录状态，便于前端显示登录页
+  if (p === '/api/auth/me' && method === 'GET') {
+    const u = currentUser(req) || basicUser(req);
+    return sendJSON(res, 200, {
+      authenticated: !!u, user: u ? publicUser(u) : null,
+      mode: 'server', defaultPassword: !!u && !!u.mustChange
+    });
+  }
+  if (p === '/api/auth/login' && method === 'POST') {
+    const ip = clientIP(req);
+    if (loginLocked(ip)) return sendJSON(res, 429, { error: '尝试次数过多，请 5 分钟后再试' });
+    const b = await parseBody(req);
+    const name = String(b.username || '').trim();
+    const pass = String(b.password || '');
+    const key = userKey(name);
+    const u = users[key];
+    if (!u || !verifyPassword(pass, u.passHash)) {
+      noteLoginFail(ip);
+      return sendJSON(res, 401, { error: '用户名或密码不正确' });
+    }
+    loginFails.delete(ip);
+    const token = crypto.randomBytes(32).toString('base64url');
+    sessions.set(token, { key, expires: Date.now() + SESSION_TTL * 1000 });
+    log('用户登录  ' + u.username);
+    return sendJSON(res, 200, { ok: true, user: publicUser(u) }, {
+      'Set-Cookie': SESSION_COOKIE + '=' + token + '; Path=/; HttpOnly; SameSite=Lax; Max-Age=' + SESSION_TTL
+    });
+  }
+
+  const me = currentUser(req) || basicUser(req);
+  if (!me) return sendJSON(res, 401, { error: '请先登录', loginRequired: true });
+
+  if (p === '/api/auth/logout' && method === 'POST') {
+    const token = sessionToken(req);
+    if (token) sessions.delete(token);
+    return sendJSON(res, 200, { ok: true }, {
+      'Set-Cookie': SESSION_COOKIE + '=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0'
+    });
+  }
+  if (p === '/api/auth/password' && method === 'POST') {
+    const b = await parseBody(req);
+    if (!verifyPassword(String(b.oldPassword || ''), me.passHash)) return sendJSON(res, 400, { error: '当前密码不正确' });
+    if (!validPassword(b.newPassword)) return sendJSON(res, 400, { error: '新密码长度需为 6–128 位' });
+    me.passHash = hashPassword(b.newPassword);
+    me.mustChange = false;
+    me.passwordChangedAt = new Date().toISOString();
+    await saveUsers();
+    dropSessions(userKey(me.username), sessionToken(req));
+    log('用户改密  ' + me.username);
+    return sendJSON(res, 200, { ok: true, user: publicUser(me) });
+  }
+  if (p === '/api/auth/users' && method === 'GET') {
+    if (!requireAdmin(me, res)) return;
+    return sendJSON(res, 200, { users: Object.keys(users).map(function (k) { return publicUser(users[k]); }) });
+  }
+  if (p === '/api/auth/users' && method === 'POST') {
+    if (!requireAdmin(me, res)) return;
+    const b = await parseBody(req);
+    const name = String(b.username || '').trim();
+    if (!validUsername(name)) return sendJSON(res, 400, { error: '用户名需为 2–32 位字母、数字、点、下划线或连字符' });
+    if (users[userKey(name)]) return sendJSON(res, 409, { error: '该用户名已存在' });
+    if (!validPassword(b.password)) return sendJSON(res, 400, { error: '密码长度需为 6–128 位' });
+    const u = {
+      username: name, role: b.role === 'admin' ? 'admin' : 'member',
+      passHash: hashPassword(b.password), createdAt: new Date().toISOString(),
+      passwordChangedAt: null, mustChange: false
+    };
+    users[userKey(name)] = u;
+    await saveUsers();
+    log('新增用户  ' + name + '（' + u.role + '）');
+    return sendJSON(res, 200, { ok: true, user: publicUser(u) });
+  }
+  const resetMatch = p.match(/^\/api\/auth\/users\/([^/]+)\/password$/);
+  if (resetMatch && method === 'POST') {
+    if (!requireAdmin(me, res)) return;
+    const key = userKey(decodeURIComponent(resetMatch[1]));
+    const target = users[key];
+    if (!target) return sendJSON(res, 404, { error: '用户不存在' });
+    const b = await parseBody(req);
+    if (!validPassword(b.password)) return sendJSON(res, 400, { error: '新密码长度需为 6–128 位' });
+    target.passHash = hashPassword(b.password);
+    target.mustChange = true;
+    target.passwordChangedAt = new Date().toISOString();
+    await saveUsers();
+    dropSessions(key, sessionToken(req));
+    log('重置密码  ' + target.username + '（由 ' + me.username + ' 操作）');
+    return sendJSON(res, 200, { ok: true, user: publicUser(target) });
+  }
+  const roleMatch = p.match(/^\/api\/auth\/users\/([^/]+)\/role$/);
+  if (roleMatch && method === 'POST') {
+    if (!requireAdmin(me, res)) return;
+    const key = userKey(decodeURIComponent(roleMatch[1]));
+    const target = users[key];
+    if (!target) return sendJSON(res, 404, { error: '用户不存在' });
+    const b = await parseBody(req);
+    const role = b.role === 'admin' ? 'admin' : 'member';
+    if (target.role === 'admin' && role === 'member' && adminCount() <= 1) return sendJSON(res, 400, { error: '至少需要保留一名管理员' });
+    target.role = role;
+    await saveUsers();
+    log('调整角色  ' + target.username + ' → ' + role);
+    return sendJSON(res, 200, { ok: true, user: publicUser(target) });
+  }
+  const delMatch = p.match(/^\/api\/auth\/users\/([^/]+)$/);
+  if (delMatch && method === 'DELETE') {
+    if (!requireAdmin(me, res)) return;
+    const key = userKey(decodeURIComponent(delMatch[1]));
+    const target = users[key];
+    if (!target) return sendJSON(res, 404, { error: '用户不存在' });
+    if (key === userKey(me.username)) return sendJSON(res, 400, { error: '不能删除当前登录的账号' });
+    if (target.role === 'admin' && adminCount() <= 1) return sendJSON(res, 400, { error: '至少需要保留一名管理员' });
+    delete users[key];
+    await saveUsers();
+    dropSessions(key, '');
+    log('删除用户  ' + target.username + '（由 ' + me.username + ' 操作）');
+    return sendJSON(res, 200, { ok: true });
+  }
+  return sendJSON(res, 404, { error: '接口不存在' });
 }
 
 /* ---------------- 路由 ---------------- */
@@ -612,10 +835,14 @@ async function handle(req, res) {
     return sendJSON(res, 200, {
       ok: true, app: 'nestledger', version: activeVersion(),
       hasData: await exists(DB_FILE), ...(await readMeta()),
-      auth: !!(AUTH_USER && AUTH_PASS)
+      auth: !AUTH_BYPASS, authRequired: !AUTH_BYPASS
     });
   }
-  if (!checkAuth(req, res)) return;
+  await ensureUsers();
+  // 登录接口自身处理认证状态
+  if (p.startsWith('/api/auth/')) return handleAuth(req, res, p, method);
+  // 业务接口强制登录；静态首页保持可访问，由前端显示登录界面
+  if (p.startsWith('/api/') && !await checkAuth(req, res)) return;
 
   if (p === '/api/version') {
     if (method !== 'GET') return sendJSON(res, 405, { error: '仅支持 GET' });
@@ -666,7 +893,7 @@ async function handle(req, res) {
     return sendFile(res, file, 'application/json; charset=utf-8', name);
   }
 
-  // ---- 自动更新接口（均在 Basic Auth 之后）----
+  // ---- 自动更新接口（均在登录保护之后）----
   if (p === '/api/update/status') {
     if (method !== 'GET') return sendJSON(res, 405, { error: '仅支持 GET' });
     return sendJSON(res, 200, updateStatus());
@@ -744,7 +971,7 @@ async function main() {
     log('网页目录  ' + effectiveWebDir());
     log('已有数据  ' + (meta.hasData ? '是（rev ' + meta.rev + '）' : '否，等待首次同步'));
     log('自动快照  ' + (BACKUP_ON_WRITE ? '开启（保留最近 ' + BACKUP_KEEP + ' 份）' : '关闭'));
-    log('访问认证  ' + (AUTH_USER && AUTH_PASS ? '已开启 Basic Auth' : '未开启（建议仅局域网使用）'));
+    log('访问认证  ' + (AUTH_BYPASS ? '测试模式已跳过（切勿用于正式部署）' : '强制账号登录，用户库 ' + USERS_FILE));
     startAutoUpdate();
   });
 }

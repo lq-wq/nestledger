@@ -10,11 +10,15 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import net from 'node:net';
-import http from 'node:http';
 import zlib from 'node:zlib';
 import crypto from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { createRequire } from 'node:module';
+import { installFetchShim } from './fetch-shim.mjs';
+installFetchShim();
+const require = createRequire(import.meta.url);
+const http = require('node:http');
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'nestledger-upd-'));
@@ -109,7 +113,7 @@ const env = {
   UPDATE_MANIFEST_URL: 'http://127.0.0.1:' + fakePort + '/update/latest.json',
   UPDATE_ONLY_CUSTOM: '1',   // 测试期间绝不回退到真实 GitHub
   UPDATE_TIMEOUT: '2500', UPDATE_INTERVAL: '999999', UPDATE_AUTO: '0',
-  NESTLEDGER_CONTAINER: '', AUTH_USER: '', AUTH_PASS: ''
+  NESTLEDGER_CONTAINER: '', AUTH_USER: '', AUTH_PASS: '', NESTLEDGER_TEST_NO_AUTH: '1'
 };
 const child = spawn(process.execPath, [path.join(ROOT, 'server/index.js')], { env, stdio: ['ignore', 'pipe', 'pipe'] });
 let childLog = '';

@@ -121,7 +121,7 @@ ZIP 解开后是 `nestledger/` 这一层；如果又新建同名文件夹再解�
 - 业务数据仍在 Compose 项目目录的 `./data`，重启 / 换版本都不丢
 - 唯一外部依赖是 `node:22-alpine` 基础镜像，国内 NAS 拉不到时见第 10 节
 
-**改配置**：主文件**不读 `.env`**。端口改 `ports: - "8787:8787"`；口令在 `environment` 里取消 `AUTH_USER` / `AUTH_PASS` 两行注释；快照份数改 `BACKUP_KEEP`；附件上限改 `MAX_BODY`。改完重新启动项目。
+**改配置**：主文件**不读 `.env`**。端口改 `ports: - "8787:8787"`；初始管理员在 `environment` 里取消 `AUTH_USER` / `AUTH_PASS` 两行注释（不填则默认 `admin / admin123`，登录后请立刻改密）；快照份数改 `BACKUP_KEEP`；附件上限改 `MAX_BODY`。改完重新启动项目。账号之后统一在网页「用户管理」里添加、改密或删除。
 
 **粘贴别截断**：`APP_BUNDLE` 是单行约 6 万字符，务必 Ctrl+A 全选复制。切到终端时可用 `bash scripts/predeploy.sh` 检查该行长度是否完整。
 
@@ -248,6 +248,17 @@ NAS 服务端每 6 小时（或网页点「检查更新」）拉取清单
 若想「只有 CI 全部通过才更新」，把 `UPDATE_MANIFEST_URL` 填成
 `https://github.com/lq-wq/nestledger/releases/download/latest/latest.json`（这个地址由 Actions 成功后才发布）。
 **v1.3.2 起**服务端会并发请求全部更新源并**自动采用最高版本**，还可用 `UPDATE_MANIFEST_URLS`（逗号分隔）一次配置多个国内镜像互为备份；弹窗「更新源检查」会列出每个源的版本与状态。
+
+**彻底绕开 GitHub 网络问题（推荐）**：让 CI 把 `update/latest.json` 镜像到 Gitee，作为唯一更新源。Gitee 国内直连、刷新快、无 jsDelivr 长缓存：
+1. Gitee 新建（或导入 GitHub 仓库）一个**公开**仓库 `nestledger`；
+2. GitHub 仓库 **Settings → Secrets → Actions** 添加 `GITEE_TOKEN`（Gitee 私人令牌）、`GITEE_USER`（用户名）、`GITEE_REPO`（`nestledger`）；
+3. 飞牛 Compose 的 `environment` 加：
+   ```yaml
+   UPDATE_ONLY_CUSTOM: 1
+   UPDATE_MANIFEST_URL: https://gitee.com/<Gitee用户名>/nestledger/raw/main/update/latest.json
+   ```
+4. 配好 secrets 后 push 一次 `main` 即触发同步（当前 v1.3.2 清单也会被镜像过去）；之后发版自动更新 Gitee，NAS「检查更新」能较快发现。
+> 同步由 `release.yml` 的 `sync-gitee` job 负责，没配 `GITEE_TOKEN` 时自动跳过。
 
 | 变量 | 默认 | 说明 |
 | --- | --- | --- |
@@ -442,4 +453,4 @@ v1.2.1 起账期从本次收租日的次月起算（如 2026-11-24 收租对应�
 
 ### 想从外网访问
 
-在主文件 YAML 的 `environment` 里取消 `AUTH_USER` / `AUTH_PASS` 注释（方式三改 `.env`），并强烈建议套一层 NAS 反向代理 + HTTPS；不要把裸端口映射到公网。
+v1.4.0 起默认就要求登录。外网访问前请务必用默认账号登录后修改密码，并按需在网页「用户管理」中新增账号；同时强烈建议套一层 NAS 反向代理 + HTTPS，不要把裸端口映射到公网。如需指定首次管理员，可在主文件 YAML 的 `environment` 里取消 `AUTH_USER` / `AUTH_PASS` 注释（方式三改 `.env`）。
