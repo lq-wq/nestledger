@@ -33,6 +33,7 @@
 | 备份 | 手动导出 JSON | 每次保存自动快照 + 一键下载 + 目录级备份 |
 | 更新 | 手动替换 HTML 文件 | **网页端自动更新**（v1.3.0 起，GitHub 更新后自动升级） |
 | 适用场景 | 临时离线用、随身携带 | 长期在 NAS 上使用（推荐） |
+| 登录 | v1.4.0 起本地版也要输入账号密码（默认 `admin / admin123`） | 强制登录，账号在网页「用户管理」中维护 |
 
 > 两种模式共用同一个 `web/index.html`。程序会自动探测：能连上同步服务就以 NAS 为准，否则安静地退回纯本地模式。
 
@@ -282,6 +283,21 @@ nestledger/data/
 >
 > ⚠️ **升级到 v1.3.0 是最后一次手动替换 YAML**：把新版 `docker-compose.yml` 整份粘贴进飞牛 Compose 项目并启动即可，`./data` 不动、数据不丢。镜像版 / 源码构建版仍由容器层或 `git pull --build` 更新，它们设了 `UPDATE_OFF=1`。
 
+**国内零缓存镜像（推荐给飞牛 NAS）**：上面的 jsDelivr / raw 都绕不开 GitHub 的网络与缓存问题。更稳的做法是让 CI 在每次发版时把 `update/latest.json` **镜像到 Gitee**（国内可达、刷新快、无 CDN 长缓存），再把飞牛 Compose 的更新源指向它：
+1. 在 Gitee 新建（或用「导入 GitHub 仓库」一键建）一个**公开**仓库，建议同名 `nestledger`；
+2. 在 GitHub 仓库 **Settings → Secrets and variables → Actions → New repository secret** 添加三项：
+   - `GITEE_TOKEN`：Gitee 私人令牌（勾 `projects` / `repo` 权限）；
+   - `GITEE_USER`：你的 Gitee 用户名；
+   - `GITEE_REPO`：目标仓库名（如 `nestledger`）。
+3. 飞牛 Compose 的 `environment` 改为只信 Gitee：
+   ```yaml
+   UPDATE_ONLY_CUSTOM: 1
+   UPDATE_MANIFEST_URL: https://gitee.com/<你的Gitee用户名>/nestledger/raw/main/update/latest.json
+   ```
+4. 配好 secrets 后，再 push 一次 `main`（本段改动即可触发）会立即把当前清单同步到 Gitee；之后每次发版自动镜像，NAS 点「检查更新」就能较快发现新版本。
+
+> 该工作流由 `release.yml` 的 `sync-gitee` job 完成，未配置 `GITEE_TOKEN` 时自动跳过，不影响正常发版。
+
 **默认自包含版（方式一 / 二）· 开发者手动重建**
 
 改完 `web/index.html` 或 `server/index.js` 后，在本机执行：
@@ -349,7 +365,7 @@ node scripts/test-update.mjs      # 自动更新链路回归（65 项）
 | `BACKUP_KEEP` | `30` | 自动快照保留份数 |
 | `BACKUP_ON_WRITE` | `1` | 每次写入是否自动快照，`0` 关闭 |
 | `MAX_BODY` | `67108864` | 单次请求上限（字节），默认 64 MB |
-| `AUTH_USER` / `AUTH_PASS` | 空 | 同时填写才启用 HTTP Basic 认证 |
+| `AUTH_USER` / `AUTH_PASS` | `admin` / `admin123` | 仅用于首次启动创建初始管理员；之后在网页「用户管理」中维护 |
 | `BASE_IMAGE` | `node:22-alpine` | 源码构建时的基础镜像；国内 NAS 拉不到 Docker Hub 时换成可用地址 |
 | `UPDATE_AUTO` | `1` | 网页端发现新版后自动应用；`0` 只提示 |
 | `UPDATE_INTERVAL` | `21600` | 自动检查间隔（秒） |
@@ -367,8 +383,9 @@ node scripts/test-update.mjs      # 自动更新链路回归（65 项）
 
 ## 安全建议
 
-- 默认**不带认证**，请只在家庭局域网 / VPN 内使用；不要把 8787 端口直接映射到公网
-- 确需外网访问时：填 `AUTH_USER` / `AUTH_PASS`，并建议再套一层 NAS 的反向代理 + HTTPS
+- v1.4.0 起**默认强制登录**：首次部署用 `admin / admin123`，登录后立即在「用户管理 → 修改我的密码」改掉；`AUTH_USER` / `AUTH_PASS` 只决定首次管理员账号
+- 账号保存在 `data/users.json`，密码为加盐哈希；登录会话使用 HttpOnly Cookie，重置密码会让该用户其他设备退出登录
+- 仍建议只在家庭局域网 / VPN 内使用；不要把 8787 端口直接映射到公网。确需外网访问时再套一层 NAS 反向代理 + HTTPS
 - 数据包含租客姓名、电话、身份证号与合同扫描件，属于敏感个人信息；`data/` 不要放进公开仓库、不要同步到公共网盘
 - 容器默认以 root 运行，是为了兼容不同 NAS 对 `./data` 目录的属主差异；如果 NAS 上权限收紧，可在 compose 里增加 `user: "1000:1000"` 并提前 `chown -R 1000:1000 ./data`
 

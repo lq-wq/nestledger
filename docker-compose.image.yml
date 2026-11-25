@@ -32,7 +32,7 @@ services:
       # 镜像版由容器层更新（点「拉取 / 更新」或改用 docker-compose.autoupdate.yml），
       # 因此关闭网页端更新，避免镜像内置版本与覆盖层版本号互相打架。
       UPDATE_OFF: 1
-      # 需要口令时取消注释并填写（两个都要填）
+      # 首次启动的初始管理员（默认 admin / admin123；之后在网页「用户管理」里维护）
       # AUTH_USER: admin
       # AUTH_PASS: change-me
     volumes:
